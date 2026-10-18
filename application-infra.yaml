@@ -1,0 +1,405 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Per-Request Application Recovery Infrastructure (v1 - Multi-Service + SSM Parameter Store).
+  Creates a unified RequestKmsKey, 14-day LAG Vault, Compatibility Staging Vault,
+  always-available RDS DB Subnet Group, Workload SG, Multi-Service Restore IAM Role,
+  and SSM Parameters for automated operator/script lookup.
+
+Parameters:
+  FoundationEnvironmentName:
+    Type: String
+    Default: recovery-foundation
+    AllowedPattern: '^[a-z0-9-]+$'
+    Description: Must match the EnvironmentName of the regional Foundation stack.
+
+  ApplicationId:
+    Type: String
+    AllowedPattern: '^[a-z0-9]{2,16}$'
+    Description: Short application identifier (2-16 lowercase alphanumeric chars, e.g., payments).
+
+  RecoveryRequestId:
+    Type: String
+    AllowedPattern: '^[a-z0-9-]{4,24}$'
+    Description: Unique recovery request ID (4-24 lowercase alphanumeric/hyphen chars, e.g., req-01).
+
+  NeedStagingVault:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Set to true so non-fully-managed backups (Aurora/RDS/EC2) land in Staging before copying to LAG.
+
+  WorkloadPort:
+    Type: Number
+    Default: 5432
+    MinValue: 1
+    MaxValue: 65535
+    Description: TCP port opened on the Workload SG from the Foundation Validation SG (e.g., 5432, 3306, 2049).
+
+  SourceKmsKeyArn:
+    Type: String
+    AllowedPattern: '^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key\/[a-f0-9-]+$'
+    Description: Source/Bunker KMS Key ARN encrypting the incoming recovery points.
+
+  ProdRecipientAccountId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^([0-9]{12})?$'
+    Description: Optional 12-digit Production AWS Account ID. Leave empty during local testing.
+
+Conditions:
+  CreateStagingVault: !Equals [!Ref NeedStagingVault, 'true']
+  HasProdRecipientAccount: !Not [!Equals [!Ref ProdRecipientAccountId, '']]
+
+Resources:
+  # =========================================================================
+  # 1. UNIFIED RECOVERY KMS KEY
+  # =========================================================================
+  RequestKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub 'Unified Recovery CMK for App ${ApplicationId} (${RecoveryRequestId})'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountRootAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowAwsBackupServiceAccess
+            Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+              - 'kms:CreateGrant'
+            Resource: '*'
+          - Sid: AllowLocalWorkloadServiceRestoresAndBackups
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+              - 'kms:CreateGrant'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:CallerAccount': !Ref 'AWS::AccountId'
+              StringLike:
+                'kms:ViaService':
+                  - !Sub 'rds.${AWS::Region}.amazonaws.com'
+                  - !Sub 'elasticfilesystem.${AWS::Region}.amazonaws.com'
+                  - !Sub 'ec2.${AWS::Region}.amazonaws.com'
+                  - !Sub 's3.${AWS::Region}.amazonaws.com'
+          - !If
+            - HasProdRecipientAccount
+            - Sid: AllowProdRecipientAccountDescribeAndDecrypt
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${ProdRecipientAccountId}:root'
+              Action:
+                - 'kms:DescribeKey'
+                - 'kms:Decrypt'
+              Resource: '*'
+            - !Ref 'AWS::NoValue'
+          - !If
+            - HasProdRecipientAccount
+            - Sid: AllowProdRecipientAccountGrantCreation
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${ProdRecipientAccountId}:root'
+              Action:
+                - 'kms:CreateGrant'
+                - 'kms:GenerateDataKey*'
+              Resource: '*'
+              Condition:
+                Bool:
+                  'kms:GrantIsForAWSResource': 'true'
+            - !Ref 'AWS::NoValue'
+      Tags:
+        - Key: ApplicationId
+          Value: !Ref ApplicationId
+        - Key: RecoveryRequestId
+          Value: !Ref RecoveryRequestId
+        - Key: ProdRecipientAccountId
+          Value: !If [HasProdRecipientAccount, !Ref ProdRecipientAccountId, 'LOCAL_TEST_ONLY']
+
+  RequestKmsAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/rec-${ApplicationId}-${RecoveryRequestId}'
+      TargetKeyId: !Ref RequestKmsKey
+
+  # =========================================================================
+  # 2. BACKUP VAULTS
+  # =========================================================================
+  HandoffLagVault:
+    Type: AWS::Backup::LogicallyAirGappedBackupVault
+    Properties:
+      BackupVaultName: !Sub 'rec-lag-${ApplicationId}-${RecoveryRequestId}'
+      EncryptionKeyArn: !GetAtt RequestKmsKey.Arn
+      MinRetentionDays: 14
+      MaxRetentionDays: 14
+      BackupVaultTags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+        ProdRecipientAccountId: !If [HasProdRecipientAccount, !Ref ProdRecipientAccountId, 'LOCAL_TEST_ONLY']
+        VaultRole: HandoffLAG
+
+  CompatibilityStagingVault:
+    Type: AWS::Backup::BackupVault
+    Condition: CreateStagingVault
+    Properties:
+      BackupVaultName: !Sub 'rec-stg-${ApplicationId}-${RecoveryRequestId}'
+      EncryptionKeyArn: !GetAtt RequestKmsKey.Arn
+      BackupVaultTags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+        VaultRole: CompatibilityStaging
+
+  # =========================================================================
+  # 3. SERVICE PLACEMENT
+  # =========================================================================
+  WorkloadSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub 'rec-wkld-${ApplicationId}-${RecoveryRequestId}-sg'
+      GroupDescription: !Sub 'Workload SG for ${ApplicationId} (${RecoveryRequestId})'
+      VpcId: !ImportValue
+        'Fn::Sub': '${FoundationEnvironmentName}-VpcId'
+      SecurityGroupIngress:
+        - Description: !Sub 'Allow validation traffic from Foundation Validation SG on port ${WorkloadPort}'
+          IpProtocol: tcp
+          FromPort: !Ref WorkloadPort
+          ToPort: !Ref WorkloadPort
+          SourceSecurityGroupId: !ImportValue
+            'Fn::Sub': '${FoundationEnvironmentName}-ValidationSgId'
+      SecurityGroupEgress:
+        - Description: 'Restrict outbound traffic to VPC CIDR only'
+          IpProtocol: -1
+          CidrIp: '10.240.0.0/16'
+      Tags:
+        - Key: Name
+          Value: !Sub 'rec-wkld-${ApplicationId}-${RecoveryRequestId}-sg'
+        - Key: ApplicationId
+          Value: !Ref ApplicationId
+        - Key: RecoveryRequestId
+          Value: !Ref RecoveryRequestId
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub 'rec-dbsg-${ApplicationId}-${RecoveryRequestId}'
+      DBSubnetGroupDescription: !Sub 'Isolated DB Subnet Group for ${ApplicationId} (${RecoveryRequestId})'
+      SubnetIds:
+        - !ImportValue
+          'Fn::Sub': '${FoundationEnvironmentName}-SubnetIdA'
+        - !ImportValue
+          'Fn::Sub': '${FoundationEnvironmentName}-SubnetIdB'
+      Tags:
+        - Key: ApplicationId
+          Value: !Ref ApplicationId
+        - Key: RecoveryRequestId
+          Value: !Ref RecoveryRequestId
+
+  # =========================================================================
+  # 4. REQUEST EXECUTION ROLE
+  # =========================================================================
+  RequestBackupAndRestoreRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'rec-app-restore-${ApplicationId}-${RecoveryRequestId}'
+      PermissionsBoundary: !ImportValue
+        'Fn::Sub': '${FoundationEnvironmentName}-BoundaryArn'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: backup.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ScopedRestoreAndVaultOperations
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: KeyAccessForSourceAndRequestKey
+                Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:Encrypt'
+                  - 'kms:ReEncrypt*'
+                  - 'kms:GenerateDataKey*'
+                  - 'kms:DescribeKey'
+                  - 'kms:CreateGrant'
+                Resource:
+                  - !Ref SourceKmsKeyArn
+                  - !GetAtt RequestKmsKey.Arn
+              - Sid: TargetVaultOperations
+                Effect: Allow
+                Action:
+                  - 'backup:CopyIntoBackupVault'
+                  - 'backup:StartRestoreJob'
+                  - 'backup:StartBackupJob'
+                  - 'backup:StartCopyJob'
+                  - 'backup:Describe*'
+                Resource:
+                  - !GetAtt HandoffLagVault.BackupVaultArn
+                  - !If [CreateStagingVault, !GetAtt CompatibilityStagingVault.BackupVaultArn, !Ref 'AWS::NoValue']
+              - Sid: MultiServiceRestorePrimitives
+                Effect: Allow
+                Action:
+                  - 'rds:RestoreDBInstanceFromDBSnapshot'
+                  - 'rds:RestoreDBClusterFromSnapshot'
+                  - 'rds:Describe*'
+                  - 'elasticfilesystem:Restore*'
+                  - 'elasticfilesystem:CreateFileSystem'
+                  - 'ec2:CreateVolume'
+                  - 'ec2:RunInstances'
+                  - 'ec2:Describe*'
+                  - 's3:RestoreObject'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject*'
+                  - 's3:PutObject*'
+                  - 's3:CreateBucket'
+                Resource: '*'
+
+  # =========================================================================
+  # 5. SSM PARAMETERS (Automatic Output Caching for Operators & Scripts)
+  # =========================================================================
+  ParamKmsKeyArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/kms-key-arn'
+      Type: String
+      Value: !GetAtt RequestKmsKey.Arn
+      Description: !Sub 'Unified CMK ARN for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
+  ParamLagVaultName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/lag-vault-name'
+      Type: String
+      Value: !Ref HandoffLagVault
+      Description: !Sub '14-day locked LAG Vault Name for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
+  ParamLagVaultArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/lag-vault-arn'
+      Type: String
+      Value: !GetAtt HandoffLagVault.BackupVaultArn
+      Description: !Sub '14-day locked LAG Vault ARN for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
+  ParamStagingVaultName:
+    Type: AWS::SSM::Parameter
+    Condition: CreateStagingVault
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/staging-vault-name'
+      Type: String
+      Value: !Ref CompatibilityStagingVault
+      Description: !Sub 'Compatibility Staging Vault Name for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
+  ParamStagingVaultArn:
+    Type: AWS::SSM::Parameter
+    Condition: CreateStagingVault
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/staging-vault-arn'
+      Type: String
+      Value: !GetAtt CompatibilityStagingVault.BackupVaultArn
+      Description: !Sub 'Compatibility Staging Vault ARN for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
+  ParamRestoreRoleArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/restore-role-arn'
+      Type: String
+      Value: !GetAtt RequestBackupAndRestoreRole.Arn
+      Description: !Sub 'Scoped IAM Restore Role ARN for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
+  ParamWorkloadSgId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/workload-sg-id'
+      Type: String
+      Value: !Ref WorkloadSecurityGroup
+      Description: !Sub 'Workload Security Group ID for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
+  ParamDbSubnetGroup:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/db-subnet-group'
+      Type: String
+      Value: !Ref DatabaseSubnetGroup
+      Description: !Sub 'RDS DB Subnet Group Name for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
+Outputs:
+  SsmParameterPathPrefix:
+    Description: Base SSM Parameter Store path containing all recovery variables for this request.
+    Value: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}'
+  RequestKmsKeyArn:
+    Description: Unified CMK ARN (Retained on delete).
+    Value: !GetAtt RequestKmsKey.Arn
+  RequestKmsKeyAlias:
+    Description: KMS Alias for the unified Request CMK.
+    Value: !Ref RequestKmsAlias
+  HandoffLagVaultName:
+    Description: 14-day locked LAG Backup Vault name.
+    Value: !Ref HandoffLagVault
+  HandoffLagVaultArn:
+    Description: 14-day locked LAG Backup Vault ARN.
+    Value: !GetAtt HandoffLagVault.BackupVaultArn
+  StagingVaultName:
+    Condition: CreateStagingVault
+    Description: Compatibility staging backup vault name.
+    Value: !Ref CompatibilityStagingVault
+  StagingVaultArn:
+    Condition: CreateStagingVault
+    Description: Compatibility staging backup vault ARN.
+    Value: !GetAtt CompatibilityStagingVault.BackupVaultArn
+  WorkloadSecurityGroupId:
+    Description: Security Group ID for network isolation.
+    Value: !Ref WorkloadSecurityGroup
+  DatabaseSubnetGroupName:
+    Description: RDS DB Subnet Group name for database restores.
+    Value: !Ref DatabaseSubnetGroup
+  RestoreExecutionRoleArn:
+    Description: Scoped IAM Role ARN for AWS Backup operations across all services.
+    Value: !GetAtt RequestBackupAndRestoreRole.Arn

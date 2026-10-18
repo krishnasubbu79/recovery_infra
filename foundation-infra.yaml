@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Foundation Recovery Infrastructure (v1).
+  Provisions isolated VPC, 2 derived /24 subnets, Route Tables,
+  VPC Flow Logs, Baseline Validation Security Group, and App Stack IAM boundary.
+  (S3 Package Bucket and VPC Endpoints parked for v2).
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: recovery-foundation
+    AllowedPattern: '^[a-z0-9-]+$'
+    Description: Prefix used for all CloudFormation Exports in this Region.
+
+  VpcCidr:
+    Type: String
+    Default: '10.240.0.0/20'
+    Description: Approved /20 CIDR block for the recovery VPC.
+
+  AvailabilityZoneA:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: First Availability Zone.
+
+  AvailabilityZoneB:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: Second Availability Zone.
+
+Resources:
+  # =========================================================================
+  # 1. NETWORKING (Isolated VPC, Derived /24 Subnets, Route Tables)
+  # =========================================================================
+  RecoveryVpc:
+    Type: AWS::EC2::VPC
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-vpc'
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RecoveryVpc
+      CidrBlock: !Select [0, !Cidr [!GetAtt RecoveryVpc.CidrBlock, 2, 8]]
+      AvailabilityZone: !Ref AvailabilityZoneA
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-subnet-a'
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RecoveryVpc
+      CidrBlock: !Select [1, !Cidr [!GetAtt RecoveryVpc.CidrBlock, 2, 8]]
+      AvailabilityZone: !Ref AvailabilityZoneB
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-subnet-b'
+
+  RouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref RecoveryVpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rt-a'
+
+  RouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref RecoveryVpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-rt-b'
+
+  SubnetRouteTableAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref RouteTableA
+
+  SubnetRouteTableAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref RouteTableB
+
+  # =========================================================================
+  # 2. BASELINE SECURITY GROUP
+  # =========================================================================
+  ValidationClientSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${EnvironmentName}-validation-client-sg'
+      GroupDescription: Baseline SG for validation hosts. Egress scoped to VPC CIDR.
+      VpcId: !Ref RecoveryVpc
+      SecurityGroupEgress:
+        - Description: Allow outbound validation checks to restored workloads inside VPC
+          IpProtocol: tcp
+          FromPort: 1
+          ToPort: 65535
+          CidrIp: !Ref VpcCidr
+      Tags:
+        - Key: Name
+          Value: !Sub '${EnvironmentName}-validation-client-sg'
+
+  # =========================================================================
+  # 3. VPC FLOW LOGS
+  # =========================================================================
+  VpcFlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub '/aws/vpc/${EnvironmentName}-flow-logs'
+      RetentionInDays: 90
+
+  VpcFlowLogDeliveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: FlowLogDelivery
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:DescribeLogGroups'
+                  - 'logs:DescribeLogStreams'
+                Resource: !GetAtt VpcFlowLogGroup.Arn
+
+  VpcFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceId: !Ref RecoveryVpc
+      ResourceType: VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref VpcFlowLogGroup
+      DeliverLogsPermissionArn: !GetAtt VpcFlowLogDeliveryRole.Arn
+
+  # =========================================================================
+  # 4. PERMISSIONS BOUNDARY FOR APP STACK ROLES
+  # =========================================================================
+  AppRolePermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${EnvironmentName}-${AWS::Region}-app-boundary'
+      Description: Mandatory permissions boundary for all IAM roles created by Application Stacks.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowScopedRecoveryOperations
+            Effect: Allow
+            Action:
+              - 'backup:*'
+              - 'backup-storage:*'
+              - 'kms:DescribeKey'
+              - 'kms:Decrypt'
+              - 'kms:Encrypt'
+              - 'kms:GenerateDataKey*'
+              - 'kms:ReEncrypt*'
+              - 'kms:CreateGrant'
+              - 'rds:Restore*'
+              - 'rds:Describe*'
+              - 'elasticfilesystem:Restore*'
+              - 'elasticfilesystem:Describe*'
+              - 'ec2:Describe*'
+              - 'ec2:CreateVolume'
+              - 'ec2:RunInstances'
+            Resource: '*'
+          - Sid: DenyFoundationAndPrivilegeEscalation
+            Effect: Deny
+            Action:
+              - 'iam:*'
+              - 'organizations:*'
+              - 'account:*'
+              - 'ec2:DeleteVpc'
+              - 'ec2:DeleteSubnet'
+              - 'ec2:DeleteRouteTable'
+            Resource: '*'
+
+Outputs:
+  VpcId:
+    Value: !Ref RecoveryVpc
+    Export:
+      Name: !Sub '${EnvironmentName}-VpcId'
+  SubnetIdA:
+    Value: !Ref PrivateSubnetA
+    Export:
+      Name: !Sub '${EnvironmentName}-SubnetIdA'
+  SubnetIdB:
+    Value: !Ref PrivateSubnetB
+    Export:
+      Name: !Sub '${EnvironmentName}-SubnetIdB'
+  ValidationClientSecurityGroupId:
+    Value: !Ref ValidationClientSecurityGroup
+    Export:
+      Name: !Sub '${EnvironmentName}-ValidationSgId'
+  AppRolePermissionsBoundaryArn:
+    Value: !Ref AppRolePermissionsBoundary
+    Export:
+      Name: !Sub '${EnvironmentName}-BoundaryArn'

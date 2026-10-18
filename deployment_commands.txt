@@ -1,0 +1,43 @@
+Command 1: Deploy Foundation (One-Time per Region)
+
+aws cloudformation deploy \
+  --region ap-south-1 \
+  --stack-name recovery-foundation \
+  --template-file foundation-infra.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+    AvailabilityZoneA=ap-south-1a \
+    AvailabilityZoneB=ap-south-1b \
+
+Command 2: Deploy Application Stack (Per Request — No Lookups Needed!)
+
+# Deploy Application Stack
+aws cloudformation deploy \
+  --region ap-south-1 \
+  --stack-name rec-app-payments-req-01 \
+  --template-file application-infra.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+    ApplicationId=payments \
+    RecoveryRequestId=req-01 \
+    NeedStagingVault=true \
+    WorkloadPort=5432 \
+    SourceKmsKeyArn=arn:aws:kms:ap-south-1:111122223333:key/12345678-1234-1234-1234-123456789012 \
+    ProdRecipientAccountId=123456789012
+
+
+# Destroy Application Stack (Immediate if LAG vault is empty; after 14 days if populated)
+aws cloudformation delete-stack \
+  --region ap-south-1 \
+  --stack-name rec-app-payments-req-01
+
+
+Command 3: Destroy Application Stack (After 14-Day Retention)
+
+aws cloudformation delete-stack \
+  --region us-east-1 \
+  --stack-name rec-app-payments-req-01
+
+
+Note: Because Fn::ImportValue is used, AWS CloudFormation will automatically prevent anyone from accidentally deleting recovery-foundation while any rec-app-* stack still exists in that Region!
+
