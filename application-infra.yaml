@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Per-Request Application Recovery Infrastructure (v1 - Multi-Service + SSM Parameter Store).
+  Per-Request Application Recovery Infrastructure (v1 - Multi-Service + Multi-Source LAG KMS + SSM).
   Creates a unified RequestKmsKey, 14-day LAG Vault, Compatibility Staging Vault,
-  always-available RDS DB Subnet Group, Workload SG, Multi-Service Restore IAM Role,
-  and SSM Parameters for automated operator/script lookup.
+  always-available RDS DB Subnet Group, Workload SG, Multi-Service Restore IAM Role
+  (authorized for multiple incoming Source KMS Keys), and SSM Parameters.
 
 Parameters:
   FoundationEnvironmentName:
@@ -35,10 +35,10 @@ Parameters:
     MaxValue: 65535
     Description: TCP port opened on the Workload SG from the Foundation Validation SG (e.g., 5432, 3306, 2049).
 
-  SourceKmsKeyArn:
-    Type: String
-    AllowedPattern: '^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key\/[a-f0-9-]+$'
-    Description: Source/Bunker KMS Key ARN encrypting the incoming recovery points.
+  SourceKmsKeyArns:
+    Type: CommaDelimitedList
+    AllowedPattern: '^\s*arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key\/[a-f0-9-]+\s*$'
+    Description: Comma-separated list of Source/Bunker LAG Vault KMS Key ARNs encrypting incoming recovery points.
 
   ProdRecipientAccountId:
     Type: String
@@ -215,7 +215,7 @@ Resources:
           Value: !Ref RecoveryRequestId
 
   # =========================================================================
-  # 4. REQUEST EXECUTION ROLE
+  # 4. REQUEST EXECUTION ROLE (Supports Multiple Incoming Source KMS Keys)
   # =========================================================================
   RequestBackupAndRestoreRole:
     Type: AWS::IAM::Role
@@ -235,7 +235,15 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: KeyAccessForSourceAndRequestKey
+              - Sid: KeyAccessForSourceLagVaultKeys
+                Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:ReEncrypt*'
+                  - 'kms:DescribeKey'
+                  - 'kms:CreateGrant'
+                Resource: !Ref SourceKmsKeyArns
+              - Sid: KeyAccessForLocalRequestKey
                 Effect: Allow
                 Action:
                   - 'kms:Decrypt'
@@ -244,9 +252,7 @@ Resources:
                   - 'kms:GenerateDataKey*'
                   - 'kms:DescribeKey'
                   - 'kms:CreateGrant'
-                Resource:
-                  - !Ref SourceKmsKeyArn
-                  - !GetAtt RequestKmsKey.Arn
+                Resource: !GetAtt RequestKmsKey.Arn
               - Sid: TargetVaultOperations
                 Effect: Allow
                 Action:
@@ -280,6 +286,17 @@ Resources:
   # =========================================================================
   # 5. SSM PARAMETERS (Automatic Output Caching for Operators & Scripts)
   # =========================================================================
+  ParamSourceKmsKeyArns:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/source-kms-key-arns'
+      Type: StringList
+      Value: !Join [',', !Ref SourceKmsKeyArns]
+      Description: !Sub 'Authorized Source LAG Vault KMS Key ARNs for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
   ParamKmsKeyArn:
     Type: AWS::SSM::Parameter
     Properties:
@@ -374,6 +391,9 @@ Outputs:
   SsmParameterPathPrefix:
     Description: Base SSM Parameter Store path containing all recovery variables for this request.
     Value: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}'
+  AuthorizedSourceKmsKeyArns:
+    Description: Comma-separated list of Source KMS Key ARNs authorized on the Restore Role.
+    Value: !Join [',', !Ref SourceKmsKeyArns]
   RequestKmsKeyArn:
     Description: Unified CMK ARN (Retained on delete).
     Value: !GetAtt RequestKmsKey.Arn

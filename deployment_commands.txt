@@ -25,6 +25,22 @@ aws cloudformation deploy \
     SourceKmsKeyArn=arn:aws:kms:ap-south-1:111122223333:key/12345678-1234-1234-1234-123456789012 \
     ProdRecipientAccountId=123456789012
 
+# Example with 2 shared Bunker LAG Vault KMS keys
+aws cloudformation deploy \
+  --region ap-south-1 \
+  --stack-name rec-app-payments-req-01 \
+  --template-file application-infra.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+    FoundationEnvironmentName="recovery-foundation" \
+    ApplicationId="payments" \
+    RecoveryRequestId="req-01" \
+    NeedStagingVault="true" \
+    WorkloadPort="5432" \
+    SourceKmsKeyArns="arn:aws:kms:ap-south-1:111122223333:key/12345678-1234-1234-1234-123456789012,arn:aws:kms:ap-south-1:111122223333:key/abcdefab-abcd-abcd-abcd-abcdefabcdef"
+    ProdRecipientAccountId=123456789012
+
+
 
 # Destroy Application Stack (Immediate if LAG vault is empty; after 14 days if populated)
 aws cloudformation delete-stack \
@@ -40,4 +56,3 @@ aws cloudformation delete-stack \
 
 
 Note: Because Fn::ImportValue is used, AWS CloudFormation will automatically prevent anyone from accidentally deleting recovery-foundation while any rec-app-* stack still exists in that Region!
-
