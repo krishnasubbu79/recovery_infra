@@ -75,6 +75,7 @@ This repository implements a **Two-Tier CloudFormation Stack Pattern** (`foundat
 
 ### 2.6 Native AWS Safety Gates
 * **KMS Retention (`DeletionPolicy: Retain`):** `RequestKmsKey` survives stack deletion so recovery points in the 14-day LAG vault, and in-flight Production restores, never lose their key. Schedule its deletion after handoff (see section 7).
+* **Flow Log Retention (`DeletionPolicy: Retain`):** the Foundation flow log group, `/aws/vpc/<EnvironmentName>-flow-logs-<stack-uuid>`, survives Foundation stack deletion as audit evidence; the VPC itself is deleted. The stack-ID suffix lets you redeploy with the same `EnvironmentName`. Log events still expire after 90 days; delete the empty group with `aws logs delete-log-group` when it is no longer needed.
 * **Vault Lock Guardrail:** a logically air-gapped vault is always locked in compliance mode. AWS Backup blocks deleting `HandoffLagVault` while it holds recovery points, and allows deletion once it is empty.
 
 ---

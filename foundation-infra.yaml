@@ -33,8 +33,6 @@ Resources:
   # =========================================================================
   RecoveryVpc:
     Type: AWS::EC2::VPC
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
       CidrBlock: !Ref VpcCidr
       EnableDnsSupport: true
@@ -115,12 +113,17 @@ Resources:
   # =========================================================================
   # 3. VPC FLOW LOGS
   # =========================================================================
+  # Retained as audit evidence after the stack is deleted. The name ends with
+  # this stack's ID so a redeploy with the same EnvironmentName never collides
+  # with a group retained from an earlier stack.
   VpcFlowLogGroup:
     Type: AWS::Logs::LogGroup
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      LogGroupName: !Sub '/aws/vpc/${EnvironmentName}-flow-logs'
+      LogGroupName: !Sub
+        - '/aws/vpc/${EnvironmentName}-flow-logs-${StackUuid}'
+        - StackUuid: !Select [2, !Split ['/', !Ref 'AWS::StackId']]
       RetentionInDays: 90
 
   VpcFlowLogDeliveryRole:
@@ -254,6 +257,9 @@ Resources:
             Resource: '*'
 
 Outputs:
+  FlowLogGroupName:
+    Description: CloudWatch Logs group for VPC Flow Logs (retained when the stack is deleted).
+    Value: !Ref VpcFlowLogGroup
   VpcId:
     Value: !Ref RecoveryVpc
     Export:
