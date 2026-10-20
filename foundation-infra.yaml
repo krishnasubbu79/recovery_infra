@@ -164,15 +164,12 @@ Resources:
   # =========================================================================
   # Records every CloudFormation stack/resource failure or rollback in this
   # Region (including all application stacks) and every failed or aborted
-  # AWS Backup backup, copy, or restore job. Retained like the flow logs.
+  # AWS Backup backup, copy, or restore job. Fixed name for easy lookup; it is
+  # deleted with the stack, so redeploys never collide with an old group.
   FailureLogGroup:
     Type: AWS::Logs::LogGroup
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
     Properties:
-      LogGroupName: !Sub
-        - '/aws/events/${EnvironmentName}-failures-${StackUuid}'
-        - StackUuid: !Select [2, !Split ['/', !Ref 'AWS::StackId']]
+      LogGroupName: !Sub '/aws/events/${EnvironmentName}-failures'
       RetentionInDays: 365
 
   FailureLogResourcePolicy:
@@ -331,7 +328,7 @@ Outputs:
     Description: CloudWatch Logs group for VPC Flow Logs (retained when the stack is deleted).
     Value: !Ref VpcFlowLogGroup
   FailureLogGroupName:
-    Description: CloudWatch Logs group recording CloudFormation and AWS Backup failures (retained when the stack is deleted).
+    Description: CloudWatch Logs group recording CloudFormation and AWS Backup failures (deleted with the stack).
     Value: !Ref FailureLogGroup
   VpcId:
     Value: !Ref RecoveryVpc
