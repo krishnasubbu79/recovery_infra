@@ -76,6 +76,12 @@ This repository implements a **Two-Tier CloudFormation Stack Pattern** (`foundat
 ### 2.6 Native AWS Safety Gates
 * **KMS Retention (`DeletionPolicy: Retain`):** `RequestKmsKey` survives stack deletion so recovery points in the 14-day LAG vault, and in-flight Production restores, never lose their key. Schedule its deletion after handoff (see section 7).
 * **Flow Log Retention (`DeletionPolicy: Retain`):** the Foundation flow log group, `/aws/vpc/<EnvironmentName>-flow-logs-<stack-uuid>`, survives Foundation stack deletion as audit evidence; the VPC itself is deleted. The stack-ID suffix lets you redeploy with the same `EnvironmentName`. Log events still expire after 90 days; delete the empty group with `aws logs delete-log-group` when it is no longer needed.
+* **Failure Log (in-account):** the Foundation stack creates an EventBridge rule, `<EnvironmentName>-failures`, on the default event bus. It writes every CloudFormation stack or resource failure or rollback in the Region, plus every failed, aborted, or expired AWS Backup backup, copy, or restore job, to `/aws/events/<EnvironmentName>-failures-<stack-uuid>` (365 days, retained on stack deletion). No network path out of the account is needed. A resource event's `status-reason` gives the root cause. The rule cannot record a failure of the Foundation stack's own first deployment; `aws cloudformation deploy` reports that directly.
+  ```bash
+  aws logs tail "$(aws cloudformation describe-stacks --region "$REGION" --stack-name recovery-foundation \
+    --query "Stacks[0].Outputs[?OutputKey=='FailureLogGroupName'].OutputValue" --output text)" \
+    --region "$REGION" --since 1d --format short
+  ```
 * **Vault Lock Guardrail:** a logically air-gapped vault is always locked in compliance mode. AWS Backup blocks deleting `HandoffLagVault` while it holds recovery points, and allows deletion once it is empty.
 
 ---

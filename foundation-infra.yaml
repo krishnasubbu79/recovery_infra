@@ -160,7 +160,77 @@ Resources:
       DeliverLogsPermissionArn: !GetAtt VpcFlowLogDeliveryRole.Arn
 
   # =========================================================================
-  # 4. PERMISSIONS BOUNDARY FOR APP STACK ROLES
+  # 4. FAILURE LOG (in-account only: EventBridge default bus -> CloudWatch Logs)
+  # =========================================================================
+  # Records every CloudFormation stack/resource failure or rollback in this
+  # Region (including all application stacks) and every failed or aborted
+  # AWS Backup backup, copy, or restore job. Retained like the flow logs.
+  FailureLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub
+        - '/aws/events/${EnvironmentName}-failures-${StackUuid}'
+        - StackUuid: !Select [2, !Split ['/', !Ref 'AWS::StackId']]
+      RetentionInDays: 365
+
+  FailureLogResourcePolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub '${EnvironmentName}-failure-log-events'
+      PolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "EventBridgeToFailureLog",
+                "Effect": "Allow",
+                "Principal": { "Service": ["events.amazonaws.com", "delivery.logs.amazonaws.com"] },
+                "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+                "Resource": "${LogGroupArn}",
+                "Condition": {
+                  "ArnEquals": { "aws:SourceArn": "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${EnvironmentName}-failures" }
+                }
+              }
+            ]
+          }
+        - LogGroupArn: !GetAtt FailureLogGroup.Arn
+
+  FailureEventRule:
+    Type: AWS::Events::Rule
+    DependsOn: FailureLogResourcePolicy
+    Properties:
+      Name: !Sub '${EnvironmentName}-failures'
+      Description: Log CloudFormation failures/rollbacks and failed AWS Backup jobs to CloudWatch Logs.
+      State: ENABLED
+      EventPattern:
+        $or:
+          - source: ['aws.cloudformation']
+            detail-type:
+              - 'CloudFormation Stack Status Change'
+              - 'CloudFormation Resource Status Change'
+            detail:
+              status-details:
+                status:
+                  - suffix: '_FAILED'
+                  - wildcard: '*ROLLBACK*'
+          - source: ['aws.backup']
+            detail-type:
+              - 'Backup Job State Change'
+              - 'Copy Job State Change'
+              - 'Restore Job State Change'
+            detail:
+              $or:
+                - state: ['FAILED', 'ABORTED', 'EXPIRED']
+                - status: ['FAILED', 'ABORTED', 'EXPIRED']
+      Targets:
+        - Id: FailureLog
+          Arn: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${FailureLogGroup}'
+
+  # =========================================================================
+  # 5. PERMISSIONS BOUNDARY FOR APP STACK ROLES
   # =========================================================================
   AppRolePermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy
@@ -260,6 +330,9 @@ Outputs:
   FlowLogGroupName:
     Description: CloudWatch Logs group for VPC Flow Logs (retained when the stack is deleted).
     Value: !Ref VpcFlowLogGroup
+  FailureLogGroupName:
+    Description: CloudWatch Logs group recording CloudFormation and AWS Backup failures (retained when the stack is deleted).
+    Value: !Ref FailureLogGroup
   VpcId:
     Value: !Ref RecoveryVpc
     Export:
