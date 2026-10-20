@@ -6,23 +6,27 @@ aws cloudformation deploy \
   --template-file foundation-infra.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
+    EnvironmentName=recovery-foundation \
+    VpcCidr=10.240.0.0/20 \
     AvailabilityZoneA=ap-south-1a \
-    AvailabilityZoneB=ap-south-1b \
+    AvailabilityZoneB=ap-south-1b
+
 
 Command 2: Deploy Application Stack (Per Request — No Lookups Needed!)
 
-# Deploy Application Stack
+# Deploy Application Stack with one Source KMS key and a Production recipient
 aws cloudformation deploy \
   --region ap-south-1 \
   --stack-name rec-app-payments-req-01 \
   --template-file application-infra.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
+    FoundationEnvironmentName=recovery-foundation \
     ApplicationId=payments \
     RecoveryRequestId=req-01 \
     NeedStagingVault=true \
     WorkloadPort=5432 \
-    SourceKmsKeyArn=arn:aws:kms:ap-south-1:111122223333:key/12345678-1234-1234-1234-123456789012 \
+    SourceKmsKeyArns=arn:aws:kms:ap-south-1:111122223333:key/12345678-1234-1234-1234-123456789012 \
     ProdRecipientAccountId=123456789012
 
 # Example with 2 shared Bunker LAG Vault KMS keys
@@ -37,22 +41,28 @@ aws cloudformation deploy \
     RecoveryRequestId="req-01" \
     NeedStagingVault="true" \
     WorkloadPort="5432" \
-    SourceKmsKeyArns="arn:aws:kms:ap-south-1:111122223333:key/12345678-1234-1234-1234-123456789012,arn:aws:kms:ap-south-1:111122223333:key/abcdefab-abcd-abcd-abcd-abcdefabcdef"
+    SourceKmsKeyArns="arn:aws:kms:ap-south-1:111122223333:key/12345678-1234-1234-1234-123456789012,arn:aws:kms:ap-south-1:111122223333:key/abcdefab-abcd-abcd-abcd-abcdefabcdef" \
     ProdRecipientAccountId=123456789012
 
+# Attach the request's operator policy to the operator role
+aws iam attach-role-policy \
+  --role-name <operator-role-name> \
+  --policy-arn "$(aws ssm get-parameter --region ap-south-1 --name /recovery/payments/req-01/operator-policy-arn --query Parameter.Value --output text)"
 
 
-# Destroy Application Stack (Immediate if LAG vault is empty; after 14 days if populated)
+Command 3: Destroy Application Stack
+
+# Delete restored resources and detach the operator policy first.
+aws iam detach-role-policy \
+  --role-name <operator-role-name> \
+  --policy-arn "$(aws ssm get-parameter --region ap-south-1 --name /recovery/payments/req-01/operator-policy-arn --query Parameter.Value --output text)"
+
+# Immediate if the LAG vault is empty; fails until the 14-day retention expires if populated (rerun then).
 aws cloudformation delete-stack \
   --region ap-south-1 \
   --stack-name rec-app-payments-req-01
 
-
-Command 3: Destroy Application Stack (After 14-Day Retention)
-
-aws cloudformation delete-stack \
-  --region us-east-1 \
-  --stack-name rec-app-payments-req-01
+# RequestKmsKey is retained; schedule its deletion after the Production handoff (see deployment_readme.md, section 7).
 
 
 Note: Because Fn::ImportValue is used, AWS CloudFormation will automatically prevent anyone from accidentally deleting recovery-foundation while any rec-app-* stack still exists in that Region!

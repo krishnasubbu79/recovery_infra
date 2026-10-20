@@ -15,7 +15,9 @@ Parameters:
   VpcCidr:
     Type: String
     Default: '10.240.0.0/20'
-    Description: Approved /20 CIDR block for the recovery VPC.
+    AllowedPattern: '^10\.240\.(0|16|32|48|64|80|96|112|128|144|160|176|192|208|224|240)\.0/20$'
+    ConstraintDescription: Must be an aligned /20 inside 10.240.0.0/16 (for example 10.240.16.0/20).
+    Description: Approved /20 CIDR block for the recovery VPC (inside 10.240.0.0/16).
 
   AvailabilityZoneA:
     Type: AWS::EC2::AvailabilityZone::Name
@@ -162,37 +164,93 @@ Resources:
     Properties:
       ManagedPolicyName: !Sub '${EnvironmentName}-${AWS::Region}-app-boundary'
       Description: Mandatory permissions boundary for all IAM roles created by Application Stacks.
+      # A boundary is a ceiling: the effective permission is the intersection
+      # with the role's own policies. It must therefore cover everything the
+      # AWS Backup service role does during backup, copy, and restore of RDS,
+      # Aurora, EFS, EC2/EBS, and S3 (the AWS managed service-role policies).
+      # Anything not allowed here, including all IAM actions except PassRole
+      # to EC2, is implicitly denied.
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Sid: AllowScopedRecoveryOperations
+          - Sid: AllowBackupAndWorkloadServices
             Effect: Allow
             Action:
               - 'backup:*'
               - 'backup-storage:*'
+              - 'rds:*'
+              - 'elasticfilesystem:*'
+              - 'ec2:*'
+              - 'ebs:StartSnapshot'
+              - 'ebs:PutSnapshotBlock'
+              - 'ebs:CompleteSnapshot'
+              - 'tag:GetResources'
+              - 'cloudwatch:GetMetricData'
+              - 'events:ListRules'
+            Resource: '*'
+          - Sid: AllowKmsDataOperations
+            Effect: Allow
+            Action:
               - 'kms:DescribeKey'
               - 'kms:Decrypt'
               - 'kms:Encrypt'
               - 'kms:GenerateDataKey*'
               - 'kms:ReEncrypt*'
               - 'kms:CreateGrant'
-              - 'rds:Restore*'
-              - 'rds:Describe*'
-              - 'elasticfilesystem:Restore*'
-              - 'elasticfilesystem:Describe*'
-              - 'ec2:Describe*'
-              - 'ec2:CreateVolume'
-              - 'ec2:RunInstances'
+              - 'kms:RetireGrant'
+              - 'kms:ListGrants'
             Resource: '*'
-          - Sid: DenyFoundationAndPrivilegeEscalation
+          - Sid: AllowS3OnRecoveryBucketsOnly
+            Effect: Allow
+            Action: 's3:*'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:s3:::rec-*'
+              - !Sub 'arn:${AWS::Partition}:s3:::rec-*/*'
+          - Sid: AllowS3ListAllBuckets
+            Effect: Allow
+            Action: 's3:ListAllMyBuckets'
+            Resource: '*'
+          - Sid: AllowS3BackupEventRules
+            Effect: Allow
+            Action: 'events:*'
+            Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/AwsBackupManagedRule*'
+          - Sid: AllowPassRoleToEc2ForInstanceRestores
+            Effect: Allow
+            Action: 'iam:PassRole'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'iam:PassedToService': 'ec2.amazonaws.com'
+          - Sid: DenyNetworkEscapeAndFoundationChanges
             Effect: Deny
             Action:
-              - 'iam:*'
-              - 'organizations:*'
-              - 'account:*'
+              - 'ec2:CreateVpc'
               - 'ec2:DeleteVpc'
+              - 'ec2:ModifyVpcAttribute'
+              - 'ec2:CreateSubnet'
               - 'ec2:DeleteSubnet'
+              - 'ec2:ModifySubnetAttribute'
+              - 'ec2:CreateRouteTable'
               - 'ec2:DeleteRouteTable'
+              - 'ec2:CreateRoute'
+              - 'ec2:ReplaceRoute'
+              - 'ec2:AssociateRouteTable'
+              - 'ec2:ReplaceRouteTableAssociation'
+              - 'ec2:CreateInternetGateway'
+              - 'ec2:AttachInternetGateway'
+              - 'ec2:CreateEgressOnlyInternetGateway'
+              - 'ec2:CreateNatGateway'
+              - 'ec2:AllocateAddress'
+              - 'ec2:AssociateAddress'
+              - 'ec2:CreateVpcPeeringConnection'
+              - 'ec2:AcceptVpcPeeringConnection'
+              - 'ec2:CreateTransitGatewayVpcAttachment'
+              - 'ec2:CreateVpnGateway'
+              - 'ec2:AttachVpnGateway'
+              - 'ec2:CreateVpcEndpoint'
+              - 'ec2:DeleteFlowLogs'
+              - 'ec2:AuthorizeSecurityGroupIngress'
+              - 'ec2:AuthorizeSecurityGroupEgress'
             Resource: '*'
 
 Outputs:
@@ -200,6 +258,10 @@ Outputs:
     Value: !Ref RecoveryVpc
     Export:
       Name: !Sub '${EnvironmentName}-VpcId'
+  VpcCidr:
+    Value: !GetAtt RecoveryVpc.CidrBlock
+    Export:
+      Name: !Sub '${EnvironmentName}-VpcCidr'
   SubnetIdA:
     Value: !Ref PrivateSubnetA
     Export:

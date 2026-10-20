@@ -2,8 +2,8 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Per-Request Application Recovery Infrastructure (v1 - Multi-Service + Multi-Source LAG KMS + SSM).
   Creates a unified RequestKmsKey, 14-day LAG Vault, Compatibility Staging Vault,
-  always-available RDS DB Subnet Group, Workload SG, Multi-Service Restore IAM Role
-  (authorized for multiple incoming Source KMS Keys), and SSM Parameters.
+  always-available RDS DB Subnet Group, Workload and EFS SGs, Multi-Service Restore IAM Role
+  (authorized for multiple incoming Source KMS Keys), Operator Policy, and SSM Parameters.
 
 Parameters:
   FoundationEnvironmentName:
@@ -33,7 +33,7 @@ Parameters:
     Default: 5432
     MinValue: 1
     MaxValue: 65535
-    Description: TCP port opened on the Workload SG from the Foundation Validation SG (e.g., 5432, 3306, 2049).
+    Description: TCP port opened on the Workload SG (RDS/Aurora/EC2) from the Foundation Validation SG (e.g., 5432, 3306). EFS uses the separate EFS SG on 2049.
 
   SourceKmsKeyArns:
     Type: CommaDelimitedList
@@ -82,6 +82,12 @@ Resources:
               - 'kms:DescribeKey'
               - 'kms:CreateGrant'
             Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !If
+                  - HasProdRecipientAccount
+                  - [!Ref 'AWS::AccountId', !Ref ProdRecipientAccountId]
+                  - [!Ref 'AWS::AccountId']
           - Sid: AllowLocalWorkloadServiceRestoresAndBackups
             Effect: Allow
             Principal:
@@ -99,20 +105,43 @@ Resources:
                 'kms:CallerAccount': !Ref 'AWS::AccountId'
               StringLike:
                 'kms:ViaService':
+                  - !Sub 'backup.${AWS::Region}.amazonaws.com'
                   - !Sub 'rds.${AWS::Region}.amazonaws.com'
                   - !Sub 'elasticfilesystem.${AWS::Region}.amazonaws.com'
                   - !Sub 'ec2.${AWS::Region}.amazonaws.com'
                   - !Sub 's3.${AWS::Region}.amazonaws.com'
+          # Prod restores from the RAM-shared LAG vault through its own AWS
+          # Backup restore role and the AWS Backup service-linked role, so the
+          # account principal is required, but only for calls made through
+          # AWS services in this Region.
           - !If
             - HasProdRecipientAccount
-            - Sid: AllowProdRecipientAccountDescribeAndDecrypt
+            - Sid: AllowProdRecipientAccountDescribeKey
+              Effect: Allow
+              Principal:
+                AWS: !Sub 'arn:${AWS::Partition}:iam::${ProdRecipientAccountId}:root'
+              Action: 'kms:DescribeKey'
+              Resource: '*'
+            - !Ref 'AWS::NoValue'
+          - !If
+            - HasProdRecipientAccount
+            - Sid: AllowProdRecipientAccountDecryptViaService
               Effect: Allow
               Principal:
                 AWS: !Sub 'arn:${AWS::Partition}:iam::${ProdRecipientAccountId}:root'
               Action:
-                - 'kms:DescribeKey'
                 - 'kms:Decrypt'
+                - 'kms:ReEncryptFrom'
+                - 'kms:GenerateDataKey*'
               Resource: '*'
+              Condition:
+                StringLike:
+                  'kms:ViaService':
+                    - !Sub 'backup.${AWS::Region}.amazonaws.com'
+                    - !Sub 'rds.${AWS::Region}.amazonaws.com'
+                    - !Sub 'elasticfilesystem.${AWS::Region}.amazonaws.com'
+                    - !Sub 'ec2.${AWS::Region}.amazonaws.com'
+                    - !Sub 's3.${AWS::Region}.amazonaws.com'
             - !Ref 'AWS::NoValue'
           - !If
             - HasProdRecipientAccount
@@ -120,9 +149,7 @@ Resources:
               Effect: Allow
               Principal:
                 AWS: !Sub 'arn:${AWS::Partition}:iam::${ProdRecipientAccountId}:root'
-              Action:
-                - 'kms:CreateGrant'
-                - 'kms:GenerateDataKey*'
+              Action: 'kms:CreateGrant'
               Resource: '*'
               Condition:
                 Bool:
@@ -187,12 +214,42 @@ Resources:
           SourceSecurityGroupId: !ImportValue
             'Fn::Sub': '${FoundationEnvironmentName}-ValidationSgId'
       SecurityGroupEgress:
-        - Description: 'Restrict outbound traffic to VPC CIDR only'
+        - Description: 'Restrict outbound traffic to the recovery VPC CIDR only'
           IpProtocol: -1
-          CidrIp: '10.240.0.0/16'
+          CidrIp: !ImportValue
+            'Fn::Sub': '${FoundationEnvironmentName}-VpcCidr'
       Tags:
         - Key: Name
           Value: !Sub 'rec-wkld-${ApplicationId}-${RecoveryRequestId}-sg'
+        - Key: ApplicationId
+          Value: !Ref ApplicationId
+        - Key: RecoveryRequestId
+          Value: !Ref RecoveryRequestId
+
+  # EFS mount targets need NFS (2049) independently of the database port, so
+  # a request that restores a database and a file system gets both.
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub 'rec-efs-${ApplicationId}-${RecoveryRequestId}-sg'
+      GroupDescription: !Sub 'EFS mount-target SG for ${ApplicationId} (${RecoveryRequestId})'
+      VpcId: !ImportValue
+        'Fn::Sub': '${FoundationEnvironmentName}-VpcId'
+      SecurityGroupIngress:
+        - Description: 'Allow NFS from Foundation Validation SG'
+          IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !ImportValue
+            'Fn::Sub': '${FoundationEnvironmentName}-ValidationSgId'
+      SecurityGroupEgress:
+        - Description: 'Restrict outbound traffic to the recovery VPC CIDR only'
+          IpProtocol: -1
+          CidrIp: !ImportValue
+            'Fn::Sub': '${FoundationEnvironmentName}-VpcCidr'
+      Tags:
+        - Key: Name
+          Value: !Sub 'rec-efs-${ApplicationId}-${RecoveryRequestId}-sg'
         - Key: ApplicationId
           Value: !Ref ApplicationId
         - Key: RecoveryRequestId
@@ -230,6 +287,19 @@ Resources:
             Principal:
               Service: backup.amazonaws.com
             Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+      # The AWS managed service-role policies carry the service-side actions
+      # AWS Backup performs (snapshot, tag, create/restore resources, S3
+      # inventory and EventBridge rules) and are kept current by AWS. The
+      # Foundation permissions boundary caps them to RDS, EFS, EC2, S3 rec-*
+      # buckets, and KMS data operations.
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AWSBackupServiceRolePolicyForS3Backup'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AWSBackupServiceRolePolicyForS3Restore'
       Policies:
         - PolicyName: ScopedRestoreAndVaultOperations
           PolicyDocument:
@@ -253,35 +323,70 @@ Resources:
                   - 'kms:DescribeKey'
                   - 'kms:CreateGrant'
                 Resource: !GetAtt RequestKmsKey.Arn
-              - Sid: TargetVaultOperations
-                Effect: Allow
-                Action:
-                  - 'backup:CopyIntoBackupVault'
-                  - 'backup:StartRestoreJob'
-                  - 'backup:StartBackupJob'
-                  - 'backup:StartCopyJob'
-                  - 'backup:Describe*'
-                Resource:
-                  - !GetAtt HandoffLagVault.BackupVaultArn
-                  - !If [CreateStagingVault, !GetAtt CompatibilityStagingVault.BackupVaultArn, !Ref 'AWS::NoValue']
-              - Sid: MultiServiceRestorePrimitives
-                Effect: Allow
-                Action:
-                  - 'rds:RestoreDBInstanceFromDBSnapshot'
-                  - 'rds:RestoreDBClusterFromSnapshot'
-                  - 'rds:Describe*'
-                  - 'elasticfilesystem:Restore*'
-                  - 'elasticfilesystem:CreateFileSystem'
-                  - 'ec2:CreateVolume'
-                  - 'ec2:RunInstances'
-                  - 'ec2:Describe*'
-                  - 's3:RestoreObject'
-                  - 's3:ListBucket'
-                  - 's3:GetBucketLocation'
-                  - 's3:GetObject*'
-                  - 's3:PutObject*'
-                  - 's3:CreateBucket'
-                Resource: '*'
+
+  # Attach to the operator role or automation that runs the runbook. AWS Backup
+  # authorizes start-*-job against the caller, not against the service role.
+  RequestOperatorPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub 'rec-app-operator-${ApplicationId}-${RecoveryRequestId}'
+      Description: !Sub 'Operator permissions to run backup, restore, copy, and handoff for ${ApplicationId} (${RecoveryRequestId})'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PassRequestRoleToBackup
+            Effect: Allow
+            Action: 'iam:PassRole'
+            Resource: !GetAtt RequestBackupAndRestoreRole.Arn
+            Condition:
+              StringEquals:
+                'iam:PassedToService': 'backup.amazonaws.com'
+          - Sid: StartBackupsIntoRequestVaults
+            Effect: Allow
+            Action: 'backup:StartBackupJob'
+            Resource:
+              - !GetAtt HandoffLagVault.BackupVaultArn
+              - !If [CreateStagingVault, !GetAtt CompatibilityStagingVault.BackupVaultArn, !Ref 'AWS::NoValue']
+          - Sid: StartRestoresAndCopiesFromRecoveryPoints
+            Effect: Allow
+            Action:
+              - 'backup:StartRestoreJob'
+              - 'backup:StartCopyJob'
+            Resource: !Sub 'arn:${AWS::Partition}:backup:${AWS::Region}:*:recovery-point:*'
+          - Sid: ReadBackupState
+            Effect: Allow
+            Action:
+              - 'backup:Describe*'
+              - 'backup:Get*'
+              - 'backup:List*'
+            Resource: '*'
+          - Sid: ReadRequestParameters
+            Effect: Allow
+            Action:
+              - 'ssm:GetParameter'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParametersByPath'
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/recovery/${ApplicationId}/${RecoveryRequestId}'
+              - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/recovery/${ApplicationId}/${RecoveryRequestId}/*'
+          - !If
+            - HasProdRecipientAccount
+            - Sid: ShareLagVaultWithProdOnly
+              Effect: Allow
+              Action:
+                - 'ram:CreateResourceShare'
+                - 'ram:AssociateResourceShare'
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  'ram:Principal': !Ref ProdRecipientAccountId
+            - !Ref 'AWS::NoValue'
+          - Sid: ReadResourceShares
+            Effect: Allow
+            Action:
+              - 'ram:Get*'
+              - 'ram:List*'
+            Resource: '*'
 
   # =========================================================================
   # 5. SSM PARAMETERS (Automatic Output Caching for Operators & Scripts)
@@ -376,6 +481,28 @@ Resources:
         ApplicationId: !Ref ApplicationId
         RecoveryRequestId: !Ref RecoveryRequestId
 
+  ParamEfsSgId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/efs-sg-id'
+      Type: String
+      Value: !Ref EfsSecurityGroup
+      Description: !Sub 'EFS mount-target Security Group ID for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
+  ParamOperatorPolicyArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/recovery/${ApplicationId}/${RecoveryRequestId}/operator-policy-arn'
+      Type: String
+      Value: !Ref RequestOperatorPolicy
+      Description: !Sub 'Operator managed policy ARN for ${ApplicationId} (${RecoveryRequestId})'
+      Tags:
+        ApplicationId: !Ref ApplicationId
+        RecoveryRequestId: !Ref RecoveryRequestId
+
   ParamDbSubnetGroup:
     Type: AWS::SSM::Parameter
     Properties:
@@ -417,9 +544,15 @@ Outputs:
   WorkloadSecurityGroupId:
     Description: Security Group ID for network isolation.
     Value: !Ref WorkloadSecurityGroup
+  EfsSecurityGroupId:
+    Description: Security Group ID for restored EFS mount targets (NFS 2049).
+    Value: !Ref EfsSecurityGroup
   DatabaseSubnetGroupName:
     Description: RDS DB Subnet Group name for database restores.
     Value: !Ref DatabaseSubnetGroup
   RestoreExecutionRoleArn:
     Description: Scoped IAM Role ARN for AWS Backup operations across all services.
     Value: !GetAtt RequestBackupAndRestoreRole.Arn
+  OperatorPolicyArn:
+    Description: Managed policy to attach to the operator or automation running this request.
+    Value: !Ref RequestOperatorPolicy
