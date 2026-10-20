@@ -65,4 +65,17 @@ aws cloudformation delete-stack \
 # RequestKmsKey is retained; schedule its deletion after the Production handoff (see deployment_readme.md, section 7).
 
 
+Command 4: Check the Failure Log (CloudFormation and AWS Backup failures)
+
+aws logs tail /aws/events/recovery-foundation-failures --region ap-south-1 --since 1d --format short
+
+
+Command 5: Destroy Foundation Stack (after all rec-app-* stacks are deleted)
+
+# Deletes the failure log group too; the VPC flow log group is retained.
+aws cloudformation delete-stack \
+  --region ap-south-1 \
+  --stack-name recovery-foundation
+
+
 Note: Because Fn::ImportValue is used, AWS CloudFormation will automatically prevent anyone from accidentally deleting recovery-foundation while any rec-app-* stack still exists in that Region!

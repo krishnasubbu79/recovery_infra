@@ -15,7 +15,8 @@ This repository implements a **Two-Tier CloudFormation Stack Pattern** (`foundat
 [Recovery Account — Foundation Stack (foundation-infra.yaml)]
        ├── Isolated Recovery VPC (one /20 inside 10.240.0.0/16) — No IGW / No NAT
        ├── Two derived /24 subnets across two AZs, local-only route tables
-       ├── VPC Flow Logs (CloudWatch Logs, 90 days)
+       ├── VPC Flow Logs (CloudWatch Logs, 90 days, retained on delete)
+       ├── Failure log: EventBridge rule → /aws/events/<env>-failures (CloudFormation + AWS Backup failures)
        ├── Validation Client Security Group
        └── IAM Permissions Boundary (caps every per-request backup/restore role)
        │
@@ -146,6 +147,15 @@ aws cloudformation deploy \
 | `recovery-foundation-SubnetIdB` | Isolated subnet B (second `/24`, for example `10.240.1.0/24`) |
 | `recovery-foundation-ValidationSgId` | Security group attached to validation runners/clients |
 | `recovery-foundation-BoundaryArn` | IAM permissions boundary for per-request roles |
+
+The stack also has two non-exported outputs: `FlowLogGroupName` (`/aws/vpc/recovery-foundation-flow-logs-<stack-uuid>`) and `FailureLogGroupName` (`/aws/events/recovery-foundation-failures`).
+
+#### Verify the Failure Log Rule
+```bash
+aws events describe-rule --name recovery-foundation-failures --region "$REGION" --query '[State,EventPattern]'
+aws events list-targets-by-rule --rule recovery-foundation-failures --region "$REGION" --query 'Targets[].Arn'
+```
+The rule should be `ENABLED` and target the `/aws/events/recovery-foundation-failures` log group. For an end-to-end test, deploy an application stack with `FoundationEnvironmentName=nope`: the import fails, the stack rolls back, and the failure appears in the log within a few minutes. Delete the failed stack afterwards.
 
 ---
 
@@ -375,3 +385,18 @@ aws cloudformation delete-stack --region "$REGION" --stack-name "rec-app-${APP_I
         --query "ResourceTagMappingList[0].ResourceARN" --output text)
       aws kms schedule-key-deletion --region "$REGION" --key-id "$KEY_ID" --pending-window-in-days 30
       ```
+
+### Deleting the Foundation Stack
+Delete every `rec-app-*` stack in the Region first; CloudFormation blocks the deletion while any of them still imports Foundation exports. Read the failure log before deleting, because it goes with the stack.
+
+```bash
+aws logs tail /aws/events/recovery-foundation-failures --region "$REGION" --since 7d --format short
+aws cloudformation delete-stack --region "$REGION" --stack-name recovery-foundation
+```
+
+* **Deleted:** the VPC, subnets, route tables, validation SG, flow log role, permissions boundary, the failure-log EventBridge rule, and the `/aws/events/recovery-foundation-failures` log group.
+* **Retained:** the flow log group `/aws/vpc/recovery-foundation-flow-logs-<stack-uuid>`. It does not block a redeploy; each deploy creates a new one. Remove old ones when no longer needed:
+  ```bash
+  aws logs describe-log-groups --region "$REGION" --log-group-name-prefix /aws/vpc/recovery-foundation-flow-logs- --query 'logGroups[].logGroupName'
+  aws logs delete-log-group --region "$REGION" --log-group-name <name>
+  ```
