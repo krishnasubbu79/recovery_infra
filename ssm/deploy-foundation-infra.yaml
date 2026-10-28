@@ -38,7 +38,7 @@ mainSteps:
     action: aws:executeScript
     timeoutSeconds: 600
     inputs:
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: deploy
       InputPayload: {"Region": "{{ global:REGION }}", "ExecutionId": "{{ automation:EXECUTION_ID }}", "TargetRoleArn": "{{ TargetRoleArn }}", "StackName": "{{ StackName }}", "EnvironmentName": "{{ EnvironmentName }}", "VpcCidr": "{{ VpcCidr }}", "AvailabilityZoneA": "{{ AvailabilityZoneA }}", "AvailabilityZoneB": "{{ AvailabilityZoneB }}"}
       Script: |
@@ -492,7 +492,7 @@ mainSteps:
     maxAttempts: 4
     isEnd: true
     inputs:
-      Runtime: python3.11
+      Runtime: python3.12
       Handler: wait
       InputPayload: {"Region": "{{ global:REGION }}", "ExecutionId": "{{ automation:EXECUTION_ID }}", "TargetRoleArn": "{{ TargetRoleArn }}", "StackName": "{{ StackName }}"}
       Script: |

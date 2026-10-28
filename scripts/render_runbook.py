@@ -206,7 +206,7 @@ def render(template_path, stack_name, description):
     def step(name, handler, extra, outputs, payload, script):
         lines = ["  - name: %s" % name, "    action: aws:executeScript", "    timeoutSeconds: 600"]
         lines += ["    " + l for l in extra]
-        lines += ["    inputs:", "      Runtime: python3.11", "      Handler: %s" % handler,
+        lines += ["    inputs:", "      Runtime: python3.12", "      Handler: %s" % handler,
                   "      InputPayload: %s" % json.dumps(payload), "      Script: |"]
         lines += [("        " + l) if l else "" for l in script.split("\n")]
         lines.append("    outputs:")
