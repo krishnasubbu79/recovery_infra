@@ -79,3 +79,16 @@ aws cloudformation delete-stack \
 
 
 Note: Because Fn::ImportValue is used, AWS CloudFormation will automatically prevent anyone from accidentally deleting recovery-foundation while any rec-app-* stack still exists in that Region!
+
+
+Command 6: Deploy Foundation into another account through the SSM runbook (see deployment_readme.md, section 8)
+
+# Run from account-B; the stack is created in account-A.
+aws ssm create-document --region ap-south-1 \
+  --name Recovery-DeployFoundation \
+  --document-type Automation --document-format YAML \
+  --content file://ssm/deploy-foundation-infra.yaml
+
+aws ssm start-automation-execution --region ap-south-1 \
+  --document-name Recovery-DeployFoundation \
+  --parameters TargetRoleArn=arn:aws:iam::<ACCOUNT_A_ID>:role/RecoveryDeployRole,AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b

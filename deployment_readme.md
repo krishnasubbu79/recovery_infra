@@ -91,7 +91,9 @@ This repository implements a **Two-Tier CloudFormation Stack Pattern** (`foundat
 ├── foundation-infra.yaml        # Persistent regional VPC, subnets, Flow Logs, validation SG, and IAM boundary
 ├── application-infra.yaml       # Per-request CMK, LAG & staging vaults, SGs, DB subnet group, roles/policies, SSM parameters
 ├── deployment_commands.txt      # Copy-paste deployment commands (ap-south-1 examples)
-└── deployment_readme.md         # Architecture and operator runbook (this file)
+├── deployment_readme.md         # Architecture and operator runbook (this file)
+├── scripts/render_runbook.py    # Generates an SSM Automation runbook from a template (see section 8)
+└── ssm/deploy-foundation-infra.yaml  # GENERATED runbook: deploys foundation-infra.yaml cross-account
 ```
 
 ---
@@ -400,3 +402,72 @@ aws cloudformation delete-stack --region "$REGION" --stack-name recovery-foundat
   aws logs describe-log-groups --region "$REGION" --log-group-name-prefix /aws/vpc/recovery-foundation-flow-logs- --query 'logGroups[].logGroupName'
   aws logs delete-log-group --region "$REGION" --log-group-name <name>
   ```
+
+---
+
+## 8. Cross-Account Deployment with an SSM Automation Runbook
+
+Use this to deploy into a target account (account-A) from another account (account-B) without StackSets and without any compute in account-B. Systems Manager runs the runbook on AWS-managed infrastructure. The runbook carries the template inline, so no S3 bucket is involved.
+
+### 8.1 How the runbook is built
+`ssm/deploy-foundation-infra.yaml` is **generated** from `foundation-infra.yaml`; do not edit it by hand. `scripts/render_runbook.py`:
+
+* creates one runbook parameter for **each** CloudFormation parameter, with the same name, default, `AllowedValues`, and `AllowedPattern` (for `String` parameters), so SSM rejects bad input before CloudFormation is called;
+* passes every one of them to CloudFormation by name (`ParameterKey` = runbook parameter name), and fails if any is missing;
+* embeds the template verbatim and stamps its SHA-256 into the runbook description, the stack tag `TemplateSha256`, and the step output; the deploy step refuses to run if the embedded template no longer matches that hash;
+* re-reads the rendered runbook and checks that the embedded template is byte-identical to the source and that every parameter is mapped, before writing the file.
+
+Runbook-only parameters: `TargetRoleArn` (deploy role in account-A, required), `StackName` (default `recovery-foundation`), and `AutomationAssumeRole` (optional role in account-B for Automation to run as).
+
+Steps:
+1. **DeployStack** assumes `TargetRoleArn`, creates a change set (`CREATE` for a new stack, `UPDATE` for an existing one) and executes it. A rerun with no changes ends as `NO_CHANGES`. A stack left in `ROLLBACK_COMPLETE` must be deleted first.
+2. **WaitForStack** polls until the stack finishes (up to about 36 minutes across retries), returns the stack outputs, or fails with the first failed resources and their reasons.
+
+Re-render after **every** change to `foundation-infra.yaml`:
+```bash
+cd recovery-infra
+uv run scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-infra.yaml \
+  --stack-name recovery-foundation \
+  --description "Deploy the recovery foundation stack (foundation-infra.yaml) into a target account."
+```
+(Without `uv`, install PyYAML and run it with `python3`.)
+
+### 8.2 One-time setup
+**Account-A (target):** a deploy role, for example `RecoveryDeployRole`, that trusts the account-B identity running the automation and can create everything in the template (CloudFormation, EC2, IAM, Logs, Events). Trust policy:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "AWS": "arn:aws:iam::<ACCOUNT_B_ID>:role/<automation-or-operator-role>" },
+    "Action": "sts:AssumeRole"
+  }]
+}
+```
+
+**Account-B (runbook owner):** the identity the automation runs as (`AutomationAssumeRole`, or the caller when it is empty) needs `sts:AssumeRole` on the account-A deploy role. If you set `AutomationAssumeRole`, that role must trust `ssm.amazonaws.com` and the caller needs `iam:PassRole` on it.
+
+Register the runbook in account-B (in the Region you will deploy to):
+```bash
+aws ssm create-document --region ap-south-1 \
+  --name Recovery-DeployFoundation \
+  --document-type Automation --document-format YAML \
+  --content file://ssm/deploy-foundation-infra.yaml
+
+# After re-rendering:
+aws ssm update-document --region ap-south-1 --name Recovery-DeployFoundation \
+  --document-version '$LATEST' --document-format YAML --content file://ssm/deploy-foundation-infra.yaml
+aws ssm update-document-default-version --region ap-south-1 --name Recovery-DeployFoundation --document-version <new-version>
+```
+
+### 8.3 Run it
+The stack is created in the Region where the automation runs.
+```bash
+aws ssm start-automation-execution --region ap-south-1 \
+  --document-name Recovery-DeployFoundation \
+  --parameters TargetRoleArn=arn:aws:iam::<ACCOUNT_A_ID>:role/RecoveryDeployRole,AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b
+
+aws ssm get-automation-execution --region ap-south-1 --automation-execution-id <id> \
+  --query 'AutomationExecution.[AutomationExecutionStatus,Outputs,FailureMessage]'
+```
+Omitted parameters (`EnvironmentName`, `VpcCidr`, `StackName`) take the template defaults. The same run can be started from the Systems Manager console, which shows a form with one field per parameter.
