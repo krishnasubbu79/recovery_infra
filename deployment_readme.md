@@ -92,6 +92,7 @@ This repository implements a **Two-Tier CloudFormation Stack Pattern** (`foundat
 ├── application-infra.yaml       # Per-request CMK, LAG & staging vaults, SGs, DB subnet group, roles/policies, SSM parameters
 ├── deployment_commands.txt      # Copy-paste deployment commands (ap-south-1 examples)
 ├── deployment_readme.md         # Architecture and operator runbook (this file)
+├── automation_roles.md          # IAM roles, permissions, and commands for the SSM runbooks (section 8)
 ├── scripts/render_runbook.py    # Generates an SSM Automation runbook from a template (see section 8)
 ├── ssm/deploy-foundation-infra.yaml               # GENERATED runbook: deploys foundation-infra.yaml cross-account
 └── ssm/deploy-foundation-infra-same-account.yaml  # GENERATED runbook: deploys foundation-infra.yaml in the same account
@@ -438,6 +439,8 @@ uv run scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-inf
 (Without `uv`, install PyYAML and run it with `python3`.)
 
 ### 8.2 One-time setup
+Ready-to-run role commands and full permission policies are in [`automation_roles.md`](automation_roles.md).
+
 **Account-A (target):** a deploy role, for example `RecoveryDeployRole`, that trusts the account-B identity running the automation and can create everything in the template (CloudFormation, EC2, IAM, Logs, Events). Trust policy:
 ```json
 {
