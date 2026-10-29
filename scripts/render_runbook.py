@@ -29,7 +29,8 @@ import yaml
 RUNBOOK_PARAMETERS = ("AutomationAssumeRole", "TargetRoleArn", "StackName")
 SAME_ACCOUNT_PARAMETERS = ("AutomationAssumeRole", "StackName")
 
-SCRIPT = r'''import hashlib
+SCRIPT = r'''import functools
+import hashlib
 import time
 
 import boto3
@@ -39,6 +40,17 @@ DONE = ("CREATE_COMPLETE", "UPDATE_COMPLETE", "IMPORT_COMPLETE")
 FAILED = ("CREATE_FAILED", "ROLLBACK_COMPLETE", "ROLLBACK_FAILED", "DELETE_COMPLETE",
           "DELETE_FAILED", "UPDATE_ROLLBACK_COMPLETE", "UPDATE_ROLLBACK_FAILED",
           "IMPORT_ROLLBACK_COMPLETE", "IMPORT_ROLLBACK_FAILED")
+
+
+def _short_errors(handler):
+    """SSM truncates the step's failure message, so raise a short error that leads with the cause."""
+    @functools.wraps(handler)
+    def run(event, context):
+        try:
+            return handler(event, context)
+        except Exception as error:
+            raise RuntimeError("%s: %s" % (type(error).__name__, error)) from None
+    return run
 
 
 def _cloudformation(event):
@@ -78,6 +90,7 @@ def _parameters(event):
     return [{"ParameterKey": name, "ParameterValue": str(event[name])} for name in TEMPLATE_PARAMETERS]
 
 
+@_short_errors
 def deploy(event, context):
     if hashlib.sha256(TEMPLATE.encode("utf-8")).hexdigest() != TEMPLATE_SHA256:
         raise RuntimeError("Embedded template does not match its SHA-256; re-render the runbook.")
@@ -116,6 +129,7 @@ def deploy(event, context):
 __DEPLOY_ONLY_END__
 
 
+@_short_errors
 def wait(event, context):
     """Poll for up to 9 minutes; the step retries if the stack is still in progress."""
     cfn = _cloudformation(event)
