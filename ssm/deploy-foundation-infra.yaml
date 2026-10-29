@@ -56,6 +56,9 @@ mainSteps:
 
         def _cloudformation(event):
             region = event["Region"]
+            if "TargetRoleArn" not in event:
+                # Same-account runbook: use the automation's own credentials.
+                return boto3.client("cloudformation", region_name=region)
             session = ("recovery-deploy-" + event["ExecutionId"])[:64]
             creds = boto3.client("sts", region_name=region).assume_role(
                 RoleArn=event["TargetRoleArn"], RoleSessionName=session)["Credentials"]
@@ -510,6 +513,9 @@ mainSteps:
 
         def _cloudformation(event):
             region = event["Region"]
+            if "TargetRoleArn" not in event:
+                # Same-account runbook: use the automation's own credentials.
+                return boto3.client("cloudformation", region_name=region)
             session = ("recovery-deploy-" + event["ExecutionId"])[:64]
             creds = boto3.client("sts", region_name=region).assume_role(
                 RoleArn=event["TargetRoleArn"], RoleSessionName=session)["Credentials"]

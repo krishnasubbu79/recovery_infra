@@ -92,3 +92,15 @@ aws ssm create-document --region ap-south-1 \
 aws ssm start-automation-execution --region ap-south-1 \
   --document-name Recovery-DeployFoundation \
   --parameters TargetRoleArn=arn:aws:iam::<ACCOUNT_A_ID>:role/RecoveryDeployRole,AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b
+
+
+Command 7: Deploy Foundation into the same account through the SSM runbook (see deployment_readme.md, section 8.4)
+
+aws ssm create-document --region ap-south-1 \
+  --name Recovery-DeployFoundation-SameAccount \
+  --document-type Automation --document-format YAML \
+  --content file://ssm/deploy-foundation-infra-same-account.yaml
+
+aws ssm start-automation-execution --region ap-south-1 \
+  --document-name Recovery-DeployFoundation-SameAccount \
+  --parameters AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b

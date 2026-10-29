@@ -93,7 +93,8 @@ This repository implements a **Two-Tier CloudFormation Stack Pattern** (`foundat
 ├── deployment_commands.txt      # Copy-paste deployment commands (ap-south-1 examples)
 ├── deployment_readme.md         # Architecture and operator runbook (this file)
 ├── scripts/render_runbook.py    # Generates an SSM Automation runbook from a template (see section 8)
-└── ssm/deploy-foundation-infra.yaml  # GENERATED runbook: deploys foundation-infra.yaml cross-account
+├── ssm/deploy-foundation-infra.yaml               # GENERATED runbook: deploys foundation-infra.yaml cross-account
+└── ssm/deploy-foundation-infra-same-account.yaml  # GENERATED runbook: deploys foundation-infra.yaml in the same account
 ```
 
 ---
@@ -429,6 +430,10 @@ cd recovery-infra
 uv run scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-infra.yaml \
   --stack-name recovery-foundation \
   --description "Deploy the recovery foundation stack (foundation-infra.yaml) into a target account."
+
+uv run scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-infra-same-account.yaml \
+  --same-account --stack-name recovery-foundation \
+  --description "Deploy the recovery foundation stack (foundation-infra.yaml) into this account."
 ```
 (Without `uv`, install PyYAML and run it with `python3`.)
 
@@ -471,3 +476,19 @@ aws ssm get-automation-execution --region ap-south-1 --automation-execution-id <
   --query 'AutomationExecution.[AutomationExecutionStatus,Outputs,FailureMessage]'
 ```
 Omitted parameters (`EnvironmentName`, `VpcCidr`, `StackName`) take the template defaults. The same run can be started from the Systems Manager console, which shows a form with one field per parameter.
+
+### 8.4 Same-account variant
+`ssm/deploy-foundation-infra-same-account.yaml` is rendered from the same template with `--same-account`. It has no `TargetRoleArn` and assumes no role: the steps call CloudFormation with the runbook's own credentials, so the stack is created in the account (and Region) where the automation runs. Template parameters, the embedded template, the SHA-256 checks, and the change-set and wait behaviour are identical to the cross-account runbook.
+
+The identity it runs as (`AutomationAssumeRole`, or the caller when empty) needs the CloudFormation permissions plus permission to create everything in the template (EC2, IAM, Logs, Events).
+
+```bash
+aws ssm create-document --region ap-south-1 \
+  --name Recovery-DeployFoundation-SameAccount \
+  --document-type Automation --document-format YAML \
+  --content file://ssm/deploy-foundation-infra-same-account.yaml
+
+aws ssm start-automation-execution --region ap-south-1 \
+  --document-name Recovery-DeployFoundation-SameAccount \
+  --parameters AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b
+```
