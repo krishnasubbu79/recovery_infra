@@ -418,7 +418,7 @@ Use this to deploy into a target account (account-A) from another account (accou
 * embeds the template verbatim and stamps its SHA-256 into the runbook description, the stack tag `TemplateSha256`, and the step output; the deploy step refuses to run if the embedded template no longer matches that hash;
 * re-reads the rendered runbook and checks that the embedded template is byte-identical to the source and that every parameter is mapped, before writing the file.
 
-Runbook-only parameters: `TargetRoleArn` (deploy role in account-A, required), `StackName` (default `recovery-foundation`), and `AutomationAssumeRole` (optional role in account-B for Automation to run as).
+Runbook-only parameters: `TargetRoleArn` (deploy role in account-A, required), `StackName` (default `recovery-foundation`), and `AutomationAssumeRole` (**required** role in account-B that Automation runs the steps as; `aws:executeScript` gets no AWS credentials without it).
 
 Steps:
 1. **DeployStack** assumes `TargetRoleArn`, creates a change set (`CREATE` for a new stack, `UPDATE` for an existing one) and executes it. A rerun with no changes ends as `NO_CHANGES`. A stack left in `ROLLBACK_COMPLETE` must be deleted first.
@@ -450,7 +450,18 @@ uv run scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-inf
 }
 ```
 
-**Account-B (runbook owner):** the identity the automation runs as (`AutomationAssumeRole`, or the caller when it is empty) needs `sts:AssumeRole` on the account-A deploy role. If you set `AutomationAssumeRole`, that role must trust `ssm.amazonaws.com` and the caller needs `iam:PassRole` on it.
+**Account-B (runbook owner):** an automation role, for example `RecoveryAutomationRole`, passed as `AutomationAssumeRole`. It must trust `ssm.amazonaws.com` and be allowed `sts:AssumeRole` on the account-A deploy role. The person starting the runbook needs `ssm:StartAutomationExecution` and `iam:PassRole` on it. The account-A deploy role should trust this automation role.
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "ssm.amazonaws.com" },
+    "Action": "sts:AssumeRole",
+    "Condition": { "StringEquals": { "aws:SourceAccount": "<ACCOUNT_B_ID>" } }
+  }]
+}
+```
 
 Register the runbook in account-B (in the Region you will deploy to):
 ```bash
@@ -470,7 +481,7 @@ The stack is created in the Region where the automation runs.
 ```bash
 aws ssm start-automation-execution --region ap-south-1 \
   --document-name Recovery-DeployFoundation \
-  --parameters TargetRoleArn=arn:aws:iam::<ACCOUNT_A_ID>:role/RecoveryDeployRole,AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b
+  --parameters AutomationAssumeRole=arn:aws:iam::<ACCOUNT_B_ID>:role/RecoveryAutomationRole,TargetRoleArn=arn:aws:iam::<ACCOUNT_A_ID>:role/RecoveryDeployRole,AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b
 
 aws ssm get-automation-execution --region ap-south-1 --automation-execution-id <id> \
   --query 'AutomationExecution.[AutomationExecutionStatus,Outputs,FailureMessage]'
@@ -480,7 +491,7 @@ Omitted parameters (`EnvironmentName`, `VpcCidr`, `StackName`) take the template
 ### 8.4 Same-account variant
 `ssm/deploy-foundation-infra-same-account.yaml` is rendered from the same template with `--same-account`. It has no `TargetRoleArn` and assumes no role: the steps call CloudFormation with the runbook's own credentials, so the stack is created in the account (and Region) where the automation runs. Template parameters, the embedded template, the SHA-256 checks, and the change-set and wait behaviour are identical to the cross-account runbook.
 
-The identity it runs as (`AutomationAssumeRole`, or the caller when empty) needs the CloudFormation permissions plus permission to create everything in the template (EC2, IAM, Logs, Events).
+`AutomationAssumeRole` is required here too. That role must trust `ssm.amazonaws.com` (same trust policy as in 8.2) and needs the CloudFormation permissions plus permission to create everything in the template (EC2, IAM, Logs, Events). The caller needs `iam:PassRole` on it.
 
 ```bash
 aws ssm create-document --region ap-south-1 \
@@ -490,5 +501,5 @@ aws ssm create-document --region ap-south-1 \
 
 aws ssm start-automation-execution --region ap-south-1 \
   --document-name Recovery-DeployFoundation-SameAccount \
-  --parameters AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b
+  --parameters AutomationAssumeRole=arn:aws:iam::<ACCOUNT_ID>:role/RecoveryAutomationRole,AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b
 ```

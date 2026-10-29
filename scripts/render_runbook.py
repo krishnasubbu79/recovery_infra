@@ -200,10 +200,11 @@ def render(template_path, stack_name, description, same_account=False):
     wait_script = head + tail
 
     parameters = {
+        # Required: aws:executeScript gets no credentials without an assume role.
         "AutomationAssumeRole": {
-            "type": "String", "default": "",
-            "allowedPattern": r"^(arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+)?$",
-            "description": "(Optional) Role in this account that Automation assumes. Must be allowed to assume TargetRoleArn. Empty = the caller's identity."},
+            "type": "String",
+            "allowedPattern": r"^arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+$",
+            "description": "(Required) Role in this account that Automation assumes to run the steps. Must trust ssm.amazonaws.com and be allowed to assume TargetRoleArn."},
         "TargetRoleArn": {
             "type": "String",
             "allowedPattern": r"^arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+$",
@@ -216,7 +217,7 @@ def render(template_path, stack_name, description, same_account=False):
     if same_account:
         del parameters["TargetRoleArn"]
         parameters["AutomationAssumeRole"]["description"] = (
-            "(Optional) Role in this account that Automation assumes to create the stack. Empty = the caller's identity.")
+            "(Required) Role in this account that Automation assumes to create the stack. Must trust ssm.amazonaws.com.")
         parameters["StackName"]["description"] = "CloudFormation stack name in this account."
     for name, spec in cfn_params.items():
         parameters[name] = runbook_parameter(name, spec)

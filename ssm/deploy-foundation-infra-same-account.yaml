@@ -5,9 +5,8 @@ assumeRole: '{{ AutomationAssumeRole }}'
 parameters:
   AutomationAssumeRole:
     type: String
-    default: ''
-    allowedPattern: ^(arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+)?$
-    description: (Optional) Role in this account that Automation assumes to create the stack. Empty = the caller's identity.
+    allowedPattern: ^arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+$
+    description: (Required) Role in this account that Automation assumes to create the stack. Must trust ssm.amazonaws.com.
   StackName:
     type: String
     default: recovery-foundation

@@ -5,9 +5,8 @@ assumeRole: '{{ AutomationAssumeRole }}'
 parameters:
   AutomationAssumeRole:
     type: String
-    default: ''
-    allowedPattern: ^(arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+)?$
-    description: (Optional) Role in this account that Automation assumes. Must be allowed to assume TargetRoleArn. Empty = the caller's identity.
+    allowedPattern: ^arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+$
+    description: (Required) Role in this account that Automation assumes to run the steps. Must trust ssm.amazonaws.com and be allowed to assume TargetRoleArn.
   TargetRoleArn:
     type: String
     allowedPattern: ^arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+$
