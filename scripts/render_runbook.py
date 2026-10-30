@@ -26,8 +26,8 @@ from pathlib import Path
 import yaml
 
 # Runbook parameters that are not CloudFormation parameters.
-RUNBOOK_PARAMETERS = ("AutomationAssumeRole", "TargetRoleArn", "StackName")
-SAME_ACCOUNT_PARAMETERS = ("AutomationAssumeRole", "StackName")
+RUNBOOK_PARAMETERS = ("AutomationAssumeRole", "TargetRoleArn", "StackName", "PreviewOnly")
+SAME_ACCOUNT_PARAMETERS = ("AutomationAssumeRole", "StackName", "PreviewOnly")
 
 SCRIPT = r'''import functools
 import hashlib
@@ -68,6 +68,10 @@ def _cloudformation(event):
         aws_session_token=creds["SessionToken"])
 
 
+def _preview(event):
+    return str(event.get("PreviewOnly", "false")).lower() == "true"
+
+
 def _stack(cfn, name):
     try:
         return cfn.describe_stacks(StackName=name)["Stacks"][0]
@@ -81,6 +85,28 @@ __DEPLOY_ONLY_START__
 TEMPLATE_SHA256 = "__SHA256__"
 TEMPLATE_PARAMETERS = __PARAMETER_NAMES__
 TEMPLATE = r"""__TEMPLATE__"""
+
+
+def _changes(cfn, name, change_set):
+    """One line per resource change, for review before (or as a record of) execution."""
+    lines, token = [], None
+    while True:
+        kwargs = {"StackName": name, "ChangeSetName": change_set}
+        if token:
+            kwargs["NextToken"] = token
+        page = cfn.describe_change_set(**kwargs)
+        for change in page.get("Changes", []):
+            rc = change.get("ResourceChange", {})
+            line = "%s %s (%s)" % (rc.get("Action"), rc.get("LogicalResourceId"), rc.get("ResourceType"))
+            if rc.get("Action") == "Modify":
+                line += " replacement=%s" % rc.get("Replacement")
+            lines.append(line)
+        token = page.get("NextToken")
+        if not token:
+            break
+    if len(lines) > 100:
+        lines = lines[:100] + ["... %d more" % (len(lines) - 100)]
+    return lines or ["(none)"]
 
 
 def _parameters(event):
@@ -122,16 +148,25 @@ def deploy(event, context):
         reason = detail.get("StatusReason", "")
         if "didn't contain changes" in reason or "No updates" in reason:
             cfn.delete_change_set(StackName=name, ChangeSetName=change_set)
-            return {"Action": "NO_CHANGES", "TemplateSha256": TEMPLATE_SHA256}
+            return {"Action": "NO_CHANGES", "TemplateSha256": TEMPLATE_SHA256,
+                    "ChangeSetName": "", "Changes": ["(none)"]}
         raise RuntimeError("Change set failed: %s" % reason)
+    changes = _changes(cfn, name, change_set)
+    if _preview(event):
+        # Leave the change set in place so it can be reviewed in the console.
+        return {"Action": "PREVIEW_" + change_set_type, "TemplateSha256": TEMPLATE_SHA256,
+                "ChangeSetName": change_set, "Changes": changes}
     cfn.execute_change_set(StackName=name, ChangeSetName=change_set)
-    return {"Action": change_set_type, "TemplateSha256": TEMPLATE_SHA256}
+    return {"Action": change_set_type, "TemplateSha256": TEMPLATE_SHA256,
+            "ChangeSetName": change_set, "Changes": changes}
 __DEPLOY_ONLY_END__
 
 
 @_short_errors
 def wait(event, context):
     """Poll for up to 9 minutes; the step retries if the stack is still in progress."""
+    if _preview(event):
+        return {"StackStatus": "PREVIEW_ONLY", "StackId": "", "Outputs": {}}
     cfn = _cloudformation(event)
     name = event["StackName"]
     deadline = time.time() + 540
@@ -213,6 +248,9 @@ def render(template_path, stack_name, description, same_account=False):
             "type": "String", "default": stack_name,
             "allowedPattern": r"^[A-Za-z][A-Za-z0-9-]{0,127}$",
             "description": "CloudFormation stack name in the target account."},
+        "PreviewOnly": {
+            "type": "String", "default": "false", "allowedValues": ["false", "true"],
+            "description": "true = create the change set and list the changes without executing it. Review, then rerun with false."},
     }
     if same_account:
         del parameters["TargetRoleArn"]
@@ -223,7 +261,8 @@ def render(template_path, stack_name, description, same_account=False):
         parameters[name] = runbook_parameter(name, spec)
 
     payload = {"Region": "{{ global:REGION }}", "ExecutionId": "{{ automation:EXECUTION_ID }}",
-               "TargetRoleArn": "{{ TargetRoleArn }}", "StackName": "{{ StackName }}"}
+               "TargetRoleArn": "{{ TargetRoleArn }}", "StackName": "{{ StackName }}",
+               "PreviewOnly": "{{ PreviewOnly }}"}
     if same_account:
         del payload["TargetRoleArn"]
     wait_payload = dict(payload)
@@ -250,13 +289,15 @@ def render(template_path, stack_name, description, same_account=False):
     doc += ["  " + l for l in yaml.safe_dump(parameters, sort_keys=False, width=10000).rstrip("\n").split("\n")]
     doc.append("mainSteps:")
     doc += step("DeployStack", "deploy", [], [
-        ("Action", "$.Payload.Action", "String"), ("TemplateSha256", "$.Payload.TemplateSha256", "String")],
+        ("Action", "$.Payload.Action", "String"), ("TemplateSha256", "$.Payload.TemplateSha256", "String"),
+        ("ChangeSetName", "$.Payload.ChangeSetName", "String"), ("Changes", "$.Payload.Changes", "StringList")],
         payload, deploy_script)
     doc += step("WaitForStack", "wait", ["maxAttempts: 4", "isEnd: true"], [
         ("StackStatus", "$.Payload.StackStatus", "String"), ("StackId", "$.Payload.StackId", "String"),
         ("Outputs", "$.Payload.Outputs", "StringMap")], wait_payload, wait_script)
     doc.append("outputs:")
-    doc += ["  - DeployStack.Action", "  - WaitForStack.StackStatus", "  - WaitForStack.Outputs"]
+    doc += ["  - DeployStack.Action", "  - DeployStack.ChangeSetName", "  - DeployStack.Changes",
+            "  - WaitForStack.StackStatus", "  - WaitForStack.Outputs"]
     return "\n".join(doc) + "\n", template_text, cfn_params, sha
 
 

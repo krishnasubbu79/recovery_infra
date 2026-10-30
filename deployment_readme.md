@@ -93,6 +93,7 @@ This repository implements a **Two-Tier CloudFormation Stack Pattern** (`foundat
 ├── deployment_commands.txt      # Copy-paste deployment commands (ap-south-1 examples)
 ├── deployment_readme.md         # Architecture and operator runbook (this file)
 ├── automation_roles.md          # IAM roles, permissions, and commands for the SSM runbooks (section 8)
+├── foundation_runbook_guide.md  # Step-by-step: first deployment and every later update through the runbook
 ├── scripts/render_runbook.py    # Generates an SSM Automation runbook from a template (see section 8)
 ├── ssm/deploy-foundation-infra.yaml               # GENERATED runbook: deploys foundation-infra.yaml cross-account
 └── ssm/deploy-foundation-infra-same-account.yaml  # GENERATED runbook: deploys foundation-infra.yaml in the same account
@@ -409,6 +410,8 @@ aws cloudformation delete-stack --region "$REGION" --stack-name recovery-foundat
 
 ## 8. Cross-Account Deployment with an SSM Automation Runbook
 
+> For the operating procedure (first deployment, template updates, preview, failures, rollback), follow [`foundation_runbook_guide.md`](foundation_runbook_guide.md). This section explains the design.
+
 Use this to deploy into a target account (account-A) from another account (account-B) without StackSets and without any compute in account-B. Systems Manager runs the runbook on AWS-managed infrastructure. The runbook carries the template inline, so no S3 bucket is involved.
 
 ### 8.1 How the runbook is built
@@ -419,10 +422,10 @@ Use this to deploy into a target account (account-A) from another account (accou
 * embeds the template verbatim and stamps its SHA-256 into the runbook description, the stack tag `TemplateSha256`, and the step output; the deploy step refuses to run if the embedded template no longer matches that hash;
 * re-reads the rendered runbook and checks that the embedded template is byte-identical to the source and that every parameter is mapped, before writing the file.
 
-Runbook-only parameters: `TargetRoleArn` (deploy role in account-A, required), `StackName` (default `recovery-foundation`), and `AutomationAssumeRole` (**required** role in account-B that Automation runs the steps as; `aws:executeScript` gets no AWS credentials without it).
+Runbook-only parameters: `TargetRoleArn` (deploy role in account-A, required), `StackName` (default `recovery-foundation`), `PreviewOnly` (default `false`; `true` creates the change set and lists the changes without executing it), and `AutomationAssumeRole` (**required** role in account-B that Automation runs the steps as; `aws:executeScript` gets no AWS credentials without it).
 
 Steps:
-1. **DeployStack** assumes `TargetRoleArn`, creates a change set (`CREATE` for a new stack, `UPDATE` for an existing one) and executes it. A rerun with no changes ends as `NO_CHANGES`. A stack left in `ROLLBACK_COMPLETE` must be deleted first.
+1. **DeployStack** assumes `TargetRoleArn`, creates a change set (`CREATE` for a new stack, `UPDATE` for an existing one), lists its changes in the `Changes` output, and executes it unless `PreviewOnly=true`. A rerun with no changes ends as `NO_CHANGES`. A stack left in `ROLLBACK_COMPLETE` must be deleted first.
 2. **WaitForStack** polls until the stack finishes (up to about 36 minutes across retries), returns the stack outputs, or fails with the first failed resources and their reasons.
 
 Re-render after **every** change to `foundation-infra.yaml`:

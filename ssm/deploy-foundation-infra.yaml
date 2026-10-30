@@ -16,6 +16,13 @@ parameters:
     default: recovery-foundation
     allowedPattern: ^[A-Za-z][A-Za-z0-9-]{0,127}$
     description: CloudFormation stack name in the target account.
+  PreviewOnly:
+    type: String
+    default: 'false'
+    allowedValues:
+    - 'false'
+    - 'true'
+    description: true = create the change set and list the changes without executing it. Review, then rerun with false.
   EnvironmentName:
     type: String
     description: (CloudFormation EnvironmentName, String) Prefix used for all CloudFormation Exports in this Region.
@@ -39,7 +46,7 @@ mainSteps:
     inputs:
       Runtime: python3.12
       Handler: deploy
-      InputPayload: {"Region": "{{ global:REGION }}", "ExecutionId": "{{ automation:EXECUTION_ID }}", "TargetRoleArn": "{{ TargetRoleArn }}", "StackName": "{{ StackName }}", "EnvironmentName": "{{ EnvironmentName }}", "VpcCidr": "{{ VpcCidr }}", "AvailabilityZoneA": "{{ AvailabilityZoneA }}", "AvailabilityZoneB": "{{ AvailabilityZoneB }}"}
+      InputPayload: {"Region": "{{ global:REGION }}", "ExecutionId": "{{ automation:EXECUTION_ID }}", "TargetRoleArn": "{{ TargetRoleArn }}", "StackName": "{{ StackName }}", "PreviewOnly": "{{ PreviewOnly }}", "EnvironmentName": "{{ EnvironmentName }}", "VpcCidr": "{{ VpcCidr }}", "AvailabilityZoneA": "{{ AvailabilityZoneA }}", "AvailabilityZoneB": "{{ AvailabilityZoneB }}"}
       Script: |
         import functools
         import hashlib
@@ -78,6 +85,10 @@ mainSteps:
                 aws_access_key_id=creds["AccessKeyId"],
                 aws_secret_access_key=creds["SecretAccessKey"],
                 aws_session_token=creds["SessionToken"])
+
+
+        def _preview(event):
+            return str(event.get("PreviewOnly", "false")).lower() == "true"
 
 
         def _stack(cfn, name):
@@ -450,6 +461,28 @@ mainSteps:
         """
 
 
+        def _changes(cfn, name, change_set):
+            """One line per resource change, for review before (or as a record of) execution."""
+            lines, token = [], None
+            while True:
+                kwargs = {"StackName": name, "ChangeSetName": change_set}
+                if token:
+                    kwargs["NextToken"] = token
+                page = cfn.describe_change_set(**kwargs)
+                for change in page.get("Changes", []):
+                    rc = change.get("ResourceChange", {})
+                    line = "%s %s (%s)" % (rc.get("Action"), rc.get("LogicalResourceId"), rc.get("ResourceType"))
+                    if rc.get("Action") == "Modify":
+                        line += " replacement=%s" % rc.get("Replacement")
+                    lines.append(line)
+                token = page.get("NextToken")
+                if not token:
+                    break
+            if len(lines) > 100:
+                lines = lines[:100] + ["... %d more" % (len(lines) - 100)]
+            return lines or ["(none)"]
+
+
         def _parameters(event):
             missing = [name for name in TEMPLATE_PARAMETERS if name not in event]
             if missing:
@@ -489,10 +522,17 @@ mainSteps:
                 reason = detail.get("StatusReason", "")
                 if "didn't contain changes" in reason or "No updates" in reason:
                     cfn.delete_change_set(StackName=name, ChangeSetName=change_set)
-                    return {"Action": "NO_CHANGES", "TemplateSha256": TEMPLATE_SHA256}
+                    return {"Action": "NO_CHANGES", "TemplateSha256": TEMPLATE_SHA256,
+                            "ChangeSetName": "", "Changes": ["(none)"]}
                 raise RuntimeError("Change set failed: %s" % reason)
+            changes = _changes(cfn, name, change_set)
+            if _preview(event):
+                # Leave the change set in place so it can be reviewed in the console.
+                return {"Action": "PREVIEW_" + change_set_type, "TemplateSha256": TEMPLATE_SHA256,
+                        "ChangeSetName": change_set, "Changes": changes}
             cfn.execute_change_set(StackName=name, ChangeSetName=change_set)
-            return {"Action": change_set_type, "TemplateSha256": TEMPLATE_SHA256}
+            return {"Action": change_set_type, "TemplateSha256": TEMPLATE_SHA256,
+                    "ChangeSetName": change_set, "Changes": changes}
 
     outputs:
       - Name: Action
@@ -501,6 +541,12 @@ mainSteps:
       - Name: TemplateSha256
         Selector: $.Payload.TemplateSha256
         Type: String
+      - Name: ChangeSetName
+        Selector: $.Payload.ChangeSetName
+        Type: String
+      - Name: Changes
+        Selector: $.Payload.Changes
+        Type: StringList
   - name: WaitForStack
     action: aws:executeScript
     timeoutSeconds: 600
@@ -509,7 +555,7 @@ mainSteps:
     inputs:
       Runtime: python3.12
       Handler: wait
-      InputPayload: {"Region": "{{ global:REGION }}", "ExecutionId": "{{ automation:EXECUTION_ID }}", "TargetRoleArn": "{{ TargetRoleArn }}", "StackName": "{{ StackName }}"}
+      InputPayload: {"Region": "{{ global:REGION }}", "ExecutionId": "{{ automation:EXECUTION_ID }}", "TargetRoleArn": "{{ TargetRoleArn }}", "StackName": "{{ StackName }}", "PreviewOnly": "{{ PreviewOnly }}"}
       Script: |
         import functools
         import hashlib
@@ -550,6 +596,10 @@ mainSteps:
                 aws_session_token=creds["SessionToken"])
 
 
+        def _preview(event):
+            return str(event.get("PreviewOnly", "false")).lower() == "true"
+
+
         def _stack(cfn, name):
             try:
                 return cfn.describe_stacks(StackName=name)["Stacks"][0]
@@ -564,6 +614,8 @@ mainSteps:
         @_short_errors
         def wait(event, context):
             """Poll for up to 9 minutes; the step retries if the stack is still in progress."""
+            if _preview(event):
+                return {"StackStatus": "PREVIEW_ONLY", "StackId": "", "Outputs": {}}
             cfn = _cloudformation(event)
             name = event["StackName"]
             deadline = time.time() + 540
@@ -596,5 +648,7 @@ mainSteps:
         Type: StringMap
 outputs:
   - DeployStack.Action
+  - DeployStack.ChangeSetName
+  - DeployStack.Changes
   - WaitForStack.StackStatus
   - WaitForStack.Outputs
