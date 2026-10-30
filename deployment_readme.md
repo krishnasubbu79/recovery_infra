@@ -94,9 +94,11 @@ This repository implements a **Two-Tier CloudFormation Stack Pattern** (`foundat
 ├── deployment_readme.md         # Architecture and operator runbook (this file)
 ├── automation_roles.md          # IAM roles, permissions, and commands for the SSM runbooks (section 8)
 ├── foundation_runbook_guide.md  # Step-by-step: first deployment and every later update through the runbook
+├── application_runbook_guide.md # Same, for per-request application stacks (same account)
 ├── scripts/render_runbook.py    # Generates an SSM Automation runbook from a template (see section 8)
 ├── ssm/deploy-foundation-infra.yaml               # GENERATED runbook: deploys foundation-infra.yaml cross-account
-└── ssm/deploy-foundation-infra-same-account.yaml  # GENERATED runbook: deploys foundation-infra.yaml in the same account
+├── ssm/deploy-foundation-infra-same-account.yaml  # GENERATED runbook: deploys foundation-infra.yaml in the same account
+└── ssm/deploy-application-infra-same-account.yaml # GENERATED runbook: deploys application-infra.yaml in the same account
 ```
 
 ---
@@ -410,7 +412,7 @@ aws cloudformation delete-stack --region "$REGION" --stack-name recovery-foundat
 
 ## 8. Cross-Account Deployment with an SSM Automation Runbook
 
-> For the operating procedure (first deployment, template updates, preview, failures, rollback), follow [`foundation_runbook_guide.md`](foundation_runbook_guide.md). This section explains the design.
+> For the operating procedure (first deployment, template updates, preview, failures, rollback), follow [`foundation_runbook_guide.md`](foundation_runbook_guide.md). For application stacks, follow [`application_runbook_guide.md`](application_runbook_guide.md). This section explains the design.
 
 Use this to deploy into a target account (account-A) from another account (account-B) without StackSets and without any compute in account-B. Systems Manager runs the runbook on AWS-managed infrastructure. The runbook carries the template inline, so no S3 bucket is involved.
 

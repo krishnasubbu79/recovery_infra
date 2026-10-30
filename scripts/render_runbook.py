@@ -20,6 +20,7 @@ import argparse
 import ast
 import hashlib
 import json
+import string
 import sys
 from pathlib import Path
 
@@ -49,7 +50,8 @@ def _short_errors(handler):
         try:
             return handler(event, context)
         except Exception as error:
-            raise RuntimeError("%s: %s" % (type(error).__name__, error)) from None
+            message = str(error) if isinstance(error, RuntimeError) else "%s: %s" % (type(error).__name__, error)
+            raise RuntimeError(message) from None
     return run
 
 
@@ -68,6 +70,30 @@ def _cloudformation(event):
         aws_session_token=creds["SessionToken"])
 
 
+def _failure_reasons(cfn, name):
+    """Failed-resource reasons from the latest stack operation only, root cause first.
+
+    Events are newest-first; a rollback adds many events, so page back to the
+    event that started the operation instead of reading a fixed number.
+    """
+    found = []
+    for page in cfn.get_paginator("describe_stack_events").paginate(StackName=name):
+        for e in page["StackEvents"]:
+            if (e.get("ResourceType") == "AWS::CloudFormation::Stack"
+                    and e["ResourceStatus"] in ("CREATE_IN_PROGRESS", "UPDATE_IN_PROGRESS")):
+                page = None
+                break
+            if (e["ResourceStatus"].endswith("_FAILED") and e.get("ResourceStatusReason")
+                    and e.get("ResourceType") != "AWS::CloudFormation::Stack"):
+                found.append("%s: %s" % (e["LogicalResourceId"], e["ResourceStatusReason"][:300]))
+        if page is None:
+            break
+    found.reverse()
+    # Resources CloudFormation cancelled because another one failed are noise.
+    found.sort(key=lambda r: "cancelled" in r.lower())
+    return found[:3] or ["no failed resource events found; see the stack events"]
+
+
 def _preview(event):
     return str(event.get("PreviewOnly", "false")).lower() == "true"
 
@@ -83,6 +109,7 @@ def _stack(cfn, name):
 
 __DEPLOY_ONLY_START__
 TEMPLATE_SHA256 = "__SHA256__"
+STACK_NAME_FORMAT = __STACK_NAME_FORMAT__
 TEMPLATE_PARAMETERS = __PARAMETER_NAMES__
 TEMPLATE = r"""__TEMPLATE__"""
 
@@ -121,7 +148,7 @@ def deploy(event, context):
     if hashlib.sha256(TEMPLATE.encode("utf-8")).hexdigest() != TEMPLATE_SHA256:
         raise RuntimeError("Embedded template does not match its SHA-256; re-render the runbook.")
     cfn = _cloudformation(event)
-    name = event["StackName"]
+    name = event["StackName"] or STACK_NAME_FORMAT.format(**event)
     stack = _stack(cfn, name)
     status = stack["StackStatus"] if stack else None
     if status is None or status == "REVIEW_IN_PROGRESS":
@@ -148,16 +175,16 @@ def deploy(event, context):
         reason = detail.get("StatusReason", "")
         if "didn't contain changes" in reason or "No updates" in reason:
             cfn.delete_change_set(StackName=name, ChangeSetName=change_set)
-            return {"Action": "NO_CHANGES", "TemplateSha256": TEMPLATE_SHA256,
+            return {"Action": "NO_CHANGES", "TemplateSha256": TEMPLATE_SHA256, "StackName": name,
                     "ChangeSetName": "", "Changes": ["(none)"]}
         raise RuntimeError("Change set failed: %s" % reason)
     changes = _changes(cfn, name, change_set)
     if _preview(event):
         # Leave the change set in place so it can be reviewed in the console.
-        return {"Action": "PREVIEW_" + change_set_type, "TemplateSha256": TEMPLATE_SHA256,
+        return {"Action": "PREVIEW_" + change_set_type, "TemplateSha256": TEMPLATE_SHA256, "StackName": name,
                 "ChangeSetName": change_set, "Changes": changes}
     cfn.execute_change_set(StackName=name, ChangeSetName=change_set)
-    return {"Action": change_set_type, "TemplateSha256": TEMPLATE_SHA256,
+    return {"Action": change_set_type, "TemplateSha256": TEMPLATE_SHA256, "StackName": name,
             "ChangeSetName": change_set, "Changes": changes}
 __DEPLOY_ONLY_END__
 
@@ -177,12 +204,8 @@ def wait(event, context):
             outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
             return {"StackStatus": status, "StackId": stack["StackId"], "Outputs": outputs}
         if status in FAILED:
-            reasons = []
-            if stack:
-                for e in cfn.describe_stack_events(StackName=name)["StackEvents"][:50]:
-                    if e["ResourceStatus"].endswith("_FAILED") and e.get("ResourceStatusReason"):
-                        reasons.append("%s: %s" % (e["LogicalResourceId"], e["ResourceStatusReason"]))
-            raise RuntimeError("Stack %s ended in %s. %s" % (name, status, " | ".join(reasons[:5])))
+            reasons = _failure_reasons(cfn, name) if stack else []
+            raise RuntimeError("Stack %s ended in %s. %s" % (name, status, " | ".join(reasons)))
         if time.time() > deadline:
             raise RuntimeError("Stack %s still %s; retrying the wait." % (name, status))
         time.sleep(15)
@@ -226,11 +249,19 @@ def render(template_path, stack_name, description, same_account=False):
     if clash:
         sys.exit("render: template parameters clash with runbook names: %s" % sorted(clash))
 
+    # A stack name with {Param} placeholders is derived from template parameters
+    # when the StackName runbook parameter is left empty.
+    placeholders = [f for _, f, _, _ in string.Formatter().parse(stack_name) if f]
+    unknown = set(placeholders) - set(cfn_params)
+    if unknown:
+        sys.exit("render: --stack-name uses unknown parameters: %s" % sorted(unknown))
+
     sha = hashlib.sha256(template_text.encode("utf-8")).hexdigest()
     head, rest = SCRIPT.split("__DEPLOY_ONLY_START__\n")
     deploy_only, tail = rest.split("__DEPLOY_ONLY_END__\n")
     deploy_script = head + (deploy_only.replace("__SHA256__", sha)
                             .replace("__PARAMETER_NAMES__", json.dumps(list(cfn_params)))
+                            .replace("__STACK_NAME_FORMAT__", json.dumps(stack_name))
                             .replace("__TEMPLATE__", template_text))
     wait_script = head + tail
 
@@ -257,6 +288,10 @@ def render(template_path, stack_name, description, same_account=False):
         parameters["AutomationAssumeRole"]["description"] = (
             "(Required) Role in this account that Automation assumes to create the stack. Must trust ssm.amazonaws.com.")
         parameters["StackName"]["description"] = "CloudFormation stack name in this account."
+    if placeholders:
+        parameters["StackName"].update(
+            default="", allowedPattern=r"^([A-Za-z][A-Za-z0-9-]{0,127})?$",
+            description="CloudFormation stack name. Empty = %s." % stack_name)
     for name, spec in cfn_params.items():
         parameters[name] = runbook_parameter(name, spec)
 
@@ -265,7 +300,7 @@ def render(template_path, stack_name, description, same_account=False):
                "PreviewOnly": "{{ PreviewOnly }}"}
     if same_account:
         del payload["TargetRoleArn"]
-    wait_payload = dict(payload)
+    wait_payload = dict(payload, StackName="{{ DeployStack.StackName }}")
     payload.update({name: "{{ %s }}" % name for name in cfn_params})
 
     def step(name, handler, extra, outputs, payload, script):
@@ -290,13 +325,13 @@ def render(template_path, stack_name, description, same_account=False):
     doc.append("mainSteps:")
     doc += step("DeployStack", "deploy", [], [
         ("Action", "$.Payload.Action", "String"), ("TemplateSha256", "$.Payload.TemplateSha256", "String"),
-        ("ChangeSetName", "$.Payload.ChangeSetName", "String"), ("Changes", "$.Payload.Changes", "StringList")],
+        ("StackName", "$.Payload.StackName", "String"), ("ChangeSetName", "$.Payload.ChangeSetName", "String"), ("Changes", "$.Payload.Changes", "StringList")],
         payload, deploy_script)
     doc += step("WaitForStack", "wait", ["maxAttempts: 4", "isEnd: true"], [
         ("StackStatus", "$.Payload.StackStatus", "String"), ("StackId", "$.Payload.StackId", "String"),
         ("Outputs", "$.Payload.Outputs", "StringMap")], wait_payload, wait_script)
     doc.append("outputs:")
-    doc += ["  - DeployStack.Action", "  - DeployStack.ChangeSetName", "  - DeployStack.Changes",
+    doc += ["  - DeployStack.StackName", "  - DeployStack.Action", "  - DeployStack.ChangeSetName", "  - DeployStack.Changes",
             "  - WaitForStack.StackStatus", "  - WaitForStack.Outputs"]
     return "\n".join(doc) + "\n", template_text, cfn_params, sha
 
@@ -329,7 +364,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("template", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--stack-name", required=True)
+    parser.add_argument("--stack-name", required=True,
+                        help="Default stack name, or a pattern such as rec-app-{ApplicationId}-{RecoveryRequestId}.")
     parser.add_argument("--description", default="Deploy a recovery CloudFormation stack into a target account.")
     parser.add_argument("--same-account", action="store_true",
                         help="Deploy into the account running the runbook (no TargetRoleArn, no role assumption).")

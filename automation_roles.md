@@ -7,6 +7,8 @@ Roles and commands needed to run the SSM Automation runbooks in `ssm/` (see `dep
 | `RecoveryAutomationRole` | Where the runbook runs | `AutomationAssumeRole` | Both runbooks (required; `aws:executeScript` has no credentials without it) |
 | `RecoveryDeployRole` | Target account (account-A) | `TargetRoleArn` | Cross-account runbook only |
 
+The application-stack runbook (`ssm/deploy-application-infra-same-account.yaml`) reuses `RecoveryAutomationRole` with one extra policy (section 6).
+
 The runbook creates the stack with these credentials directly (no CloudFormation service role), so the role that calls CloudFormation also needs permission to create every resource in `foundation-infra.yaml`. That permission set is in step 0 and is reused by both setups.
 
 Run the commands with AWS CLI v2 as an IAM administrator of the account named in each section, from a scratch directory (CloudShell works). They write JSON files to the current directory.
@@ -297,7 +299,7 @@ cat > runbook-operator.json <<EOF
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "ManageAndStartFoundationRunbooks",
+      "Sid": "ManageAndStartRecoveryRunbooks",
       "Effect": "Allow",
       "Action": [
         "ssm:CreateDocument",
@@ -308,8 +310,8 @@ cat > runbook-operator.json <<EOF
         "ssm:StartAutomationExecution"
       ],
       "Resource": [
-        "arn:aws:ssm:${REGION}:$(aws sts get-caller-identity --query Account --output text):document/Recovery-DeployFoundation*",
-        "arn:aws:ssm:${REGION}:$(aws sts get-caller-identity --query Account --output text):automation-definition/Recovery-DeployFoundation*:*"
+        "arn:aws:ssm:${REGION}:$(aws sts get-caller-identity --query Account --output text):document/Recovery-Deploy*",
+        "arn:aws:ssm:${REGION}:$(aws sts get-caller-identity --query Account --output text):automation-definition/Recovery-Deploy*:*"
       ]
     },
     {
@@ -362,3 +364,216 @@ aws iam delete-role --role-name RecoveryDeployRole
 ```
 
 If a stack still exists, keep the role that created it until the stack is deleted: deletion of the stack's IAM role, policy, and log group may need these permissions.
+
+---
+
+## 6. Application stack (same account): extra permissions for `RecoveryAutomationRole`
+
+The application runbook runs as the same `RecoveryAutomationRole` as section 1. Add a second inline policy so it can create, update, and roll back `rec-app-*` stacks. Run this in the recovery account after setting step 0's variables (`REGION`, `ACCOUNT_ID`). `FOUNDATION_ENV` must match the application runbook's `FoundationEnvironmentName` (default `recovery-foundation`).
+
+```bash
+FOUNDATION_ENV=recovery-foundation
+BOUNDARY_ARN=arn:aws:iam::${ACCOUNT_ID}:policy/${FOUNDATION_ENV}-${REGION}-app-boundary
+
+cat > application-deploy-permissions.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudFormationApplicationStacks",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateChangeSet",
+        "cloudformation:DescribeChangeSet",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:DeleteChangeSet",
+        "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStackResources",
+        "cloudformation:GetTemplate",
+        "cloudformation:TagResource"
+      ],
+      "Resource": "arn:aws:cloudformation:${REGION}:${ACCOUNT_ID}:stack/rec-app-*/*"
+    },
+    {
+      "Sid": "KmsRequestKey",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateKey",
+        "kms:DescribeKey",
+        "kms:GetKeyPolicy",
+        "kms:PutKeyPolicy",
+        "kms:EnableKeyRotation",
+        "kms:GetKeyRotationStatus",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:ListResourceTags",
+        "kms:ListAliases"
+      ],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "${REGION}" } }
+    },
+    {
+      "Sid": "KmsRequestKeyAlias",
+      "Effect": "Allow",
+      "Action": ["kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias"],
+      "Resource": [
+        "arn:aws:kms:${REGION}:${ACCOUNT_ID}:alias/rec-*",
+        "arn:aws:kms:${REGION}:${ACCOUNT_ID}:key/*"
+      ]
+    },
+    {
+      "Sid": "KmsGrantForVaultCreation",
+      "Effect": "Allow",
+      "Action": "kms:CreateGrant",
+      "Resource": "arn:aws:kms:${REGION}:${ACCOUNT_ID}:key/*",
+      "Condition": { "StringLike": { "kms:ViaService": "backup.*.amazonaws.com" } }
+    },
+    {
+      "Sid": "BackupRequestVaults",
+      "Effect": "Allow",
+      "Action": [
+        "backup:*BackupVault*",
+        "backup:TagResource",
+        "backup:UntagResource",
+        "backup:ListTags"
+      ],
+      "Resource": "arn:aws:backup:${REGION}:${ACCOUNT_ID}:backup-vault:rec-*"
+    },
+    {
+      "Sid": "BackupListAndStorage",
+      "Effect": "Allow",
+      "Action": ["backup:List*", "backup-storage:MountCapsule"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Ec2SecurityGroups",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "${REGION}" } }
+    },
+    {
+      "Sid": "RdsDbSubnetGroup",
+      "Effect": "Allow",
+      "Action": [
+        "rds:CreateDBSubnetGroup",
+        "rds:ModifyDBSubnetGroup",
+        "rds:DeleteDBSubnetGroup",
+        "rds:AddTagsToResource",
+        "rds:RemoveTagsFromResource",
+        "rds:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:rds:${REGION}:${ACCOUNT_ID}:subgrp:rec-dbsg-*"
+    },
+    {
+      "Sid": "RdsDescribe",
+      "Effect": "Allow",
+      "Action": "rds:DescribeDBSubnetGroups",
+      "Resource": "*"
+    },
+    {
+      "Sid": "SsmRequestParameters",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:DeleteParameters",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:ssm:${REGION}:${ACCOUNT_ID}:parameter/recovery/*"
+    },
+    {
+      "Sid": "SsmDescribeParameters",
+      "Effect": "Allow",
+      "Action": "ssm:DescribeParameters",
+      "Resource": "*"
+    },
+    {
+      "Sid": "IamRequestRoleOnlyWithBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePermissionsBoundary"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/rec-app-restore-*",
+      "Condition": { "StringEquals": { "iam:PermissionsBoundary": "${BOUNDARY_ARN}" } }
+    },
+    {
+      "Sid": "IamRequestRoleManage",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:DeleteRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/rec-app-restore-*"
+    },
+    {
+      "Sid": "IamOperatorPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:ListEntitiesForPolicy",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:policy/rec-app-operator-*"
+    },
+    {
+      "Sid": "NeverRemoveTheBoundary",
+      "Effect": "Deny",
+      "Action": "iam:DeleteRolePermissionsBoundary",
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name RecoveryAutomationRole \
+  --policy-name ApplicationDeploy \
+  --policy-document file://application-deploy-permissions.json
+```
+
+Why each scope:
+* **Stacks:** only `rec-app-*`, which matches the runbook's default name `rec-app-<ApplicationId>-<RecoveryRequestId>`. If you pass a custom `StackName`, keep it under that prefix.
+* **IAM roles:** the template names its role `rec-app-restore-<app>-<req>`. This role can create that role, or add and remove its policies, only while it carries the Foundation boundary (the `iam:PermissionsBoundary` condition), and it can never remove the boundary. So it cannot create unbounded roles.
+* **IAM policy:** the operator policy is named `rec-app-operator-<app>-<req>`.
+* **KMS:** `CreateKey` cannot be scoped to a key ARN. The role has no `kms:ScheduleKeyDeletion`, so it cannot delete keys. `RequestKmsKey` is retained, so a failed first create leaves a key behind; an administrator schedules it for deletion (`deployment_readme.md`, section 7).
+* **Backup vaults:** only vaults named `rec-*`. `kms:CreateGrant` is allowed only through AWS Backup, which needs it to create a vault encrypted with a customer-managed key.
+* **Delete actions** are included because a failed create or update rolls back through this same role. Deleting a whole `rec-app-*` stack stays a separate administrator action: the role has no `cloudformation:DeleteStack`.
+
+Check it:
+```bash
+aws iam get-role-policy --role-name RecoveryAutomationRole --policy-name ApplicationDeploy --query 'PolicyDocument.Statement[].Sid'
+```

@@ -112,3 +112,16 @@ aws ssm start-automation-execution --region ap-south-1 \
   --document-name Recovery-DeployFoundation-SameAccount \
   --parameters AutomationAssumeRole=arn:aws:iam::<ACCOUNT_ID>:role/RecoveryAutomationRole,AvailabilityZoneA=ap-south-1a,AvailabilityZoneB=ap-south-1b,PreviewOnly=true
 # Read DeployStack.Changes in the execution outputs, then rerun with PreviewOnly=false to apply.
+
+
+Command 9: Deploy an application stack in the same account through the SSM runbook (see application_runbook_guide.md)
+
+# Parameters go in a JSON file because SourceKmsKeyArns contains commas.
+aws ssm create-document --region ap-south-1 \
+  --name Recovery-DeployApplication-SameAccount \
+  --document-type Automation --document-format YAML \
+  --content file://ssm/deploy-application-infra-same-account.yaml
+
+aws ssm start-automation-execution --region ap-south-1 \
+  --document-name Recovery-DeployApplication-SameAccount \
+  --parameters file://params-payments-req-01.json
