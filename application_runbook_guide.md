@@ -32,6 +32,34 @@ Examples use the document name `Recovery-DeployApplication-SameAccount` in `ap-s
 
   Plus the runbook's own `AutomationAssumeRole` (required), `StackName` (empty = derived), and `PreviewOnly` (default `false`).
 
+### Workflow
+
+```text
+                 ┌──────────────────────────── DeployStack ─────────────────────────────┐   ┌─ WaitForStack ─┐
+ ┌───────────┐   ┌────────────┐   ┌─────────────┐   ┌──────────────┐   ┌────────────────┐   ┌────────────────┐
+ │ Start run │──▶│ Stack name │──▶│ Check stack │──▶│  Change set  │──▶│    Execute     │──▶│      Wait      │──▶ CREATE_ / UPDATE_COMPLETE
+ │params JSON│   │rec-app-a-r │   │new or update│   │ list changes │   │ unless preview │   │ return outputs │    (stack outputs returned)
+ └───────────┘   └────────────┘   └──────┬──────┘   └──────┬───────┘   └───────┬────────┘   └───────┬────────┘
+                                         │ busy or         │ no diff           │ PreviewOnly         │ resource
+                                         │ failed create   │                   │ =true               │ fails
+                                         ▼                 ▼                   ▼                     ▼
+                                  ┌─────────────┐   ┌──────────────┐   ┌────────────────┐   ┌────────────────┐
+                                  │   Refused   │   │  No changes  │   │  Preview only  │   │  Rolled back   │
+                                  │nothing done │   │ set deleted  │   │change set kept │   │reasons reported│
+                                  └─────────────┘   └──────────────┘   └────────────────┘   └────────────────┘
+```
+
+Only the main path with `PreviewOnly=false` changes the stack. **Refused**, **No changes**, and **Preview only** stop before anything is touched. **Rolled back** happens after execution starts, and CloudFormation reverts the stack itself.
+
+| Step | What happens |
+| :--- | :--- |
+| Start run | SSM checks every parameter against the template's own patterns, then runs the steps as `AutomationAssumeRole`. |
+| Stack name | Empty `StackName` → `rec-app-<ApplicationId>-<RecoveryRequestId>`. Passed to the wait step as `DeployStack.StackName`. |
+| Check stack | No stack → `CREATE` change set; existing stack → `UPDATE`. A stack mid-operation, or in `ROLLBACK_COMPLETE`, is **refused**: wait, or delete it as an administrator, then rerun. |
+| Change set | Built from the embedded template (SHA-256 checked) and all 7 parameters; one line per resource change in `DeployStack.Changes`. Nothing differs → **`NO_CHANGES`**, and the empty change set is deleted. |
+| Execute | `PreviewOnly=false`: executes and tags the stack with `TemplateSha256`. `PreviewOnly=true`: **stops** with `PREVIEW_CREATE`/`PREVIEW_UPDATE` and keeps the change set for review. |
+| Wait | Polls until `CREATE_COMPLETE`/`UPDATE_COMPLETE` (about 36 minutes across retries) and returns the stack outputs. On failure the stack is **rolled back**; the step reports the failed resource first, and the failure also lands in `/aws/events/recovery-foundation-failures`. |
+
 ---
 
 ## 2. Per-request parameter file
