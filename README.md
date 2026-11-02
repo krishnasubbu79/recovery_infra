@@ -17,6 +17,7 @@ Deploy the foundation first. Every application stack depends on it.
 | :--- | :--- |
 | Set up a new account or Region | [DEPLOY_FOUNDATION.md](DEPLOY_FOUNDATION.md) |
 | Start a new recovery request | [DEPLOY_APPLICATION.md](DEPLOY_APPLICATION.md) |
+| Deploy from a separate control account (runbooks in one account, stacks in another) | [cross-account/README.md](cross-account/README.md) |
 | Change a template and roll it out | The "Roll out a template change" section of the matching guide |
 | Restore data, validate it, and hand it to Production | [REFERENCE.md, section 3](REFERENCE.md#3-using-a-request-stack-restore-validate-hand-off) |
 | Understand why it is built this way | [REFERENCE.md](REFERENCE.md) |
@@ -26,14 +27,15 @@ Deploy the foundation first. Every application stack depends on it.
 ```text
 foundation-infra.yaml      CloudFormation template: foundation stack
 application-infra.yaml     CloudFormation template: per-request application stack
-ssm/                       Runbooks that deploy the templates (GENERATED: never edit by hand)
+ssm/                       Same-account runbooks that deploy the templates (GENERATED: never edit by hand)
 iam/                       IAM policies for the runbook roles, with __PLACEHOLDERS__
 scripts/fill-iam.sh        Fills the placeholders in an iam/ policy from shell variables
 scripts/run-runbook.sh     Starts a runbook in preview or deploy mode and waits for the result
-scripts/render_runbook.py  Regenerates ssm/ after a template change
+scripts/render_runbook.py  Regenerates the runbooks after a template change
 DEPLOY_FOUNDATION.md       Step-by-step: foundation stack
 DEPLOY_APPLICATION.md      Step-by-step: application stack
 REFERENCE.md               Design, SSM parameters, and the restore/handoff procedure
+cross-account/             Runbooks, role files, and guides for deploying from a control account
 ```
 
 ## How deployment works

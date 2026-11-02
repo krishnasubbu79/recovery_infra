@@ -1,5 +1,7 @@
 # Deploy an Application Stack (one per recovery request)
 
+This guide is for running the runbook **in the same account** that gets the stack. To deploy from a separate control account, use [cross-account/DEPLOY_APPLICATION.md](cross-account/DEPLOY_APPLICATION.md).
+
 Each recovery request gets its own application stack, named `rec-app-<ApplicationId>-<RecoveryRequestId>`. It holds everything that request needs: its KMS key, a staging vault, a 14-day locked handoff vault, security groups, a DB subnet group, a restore role, an operator policy, and SSM parameters under `/recovery/<app>/<request>/`.
 
 **Time:** about 20 minutes the first time in an account (one-time setup), then about 10 minutes per request.
@@ -246,9 +248,15 @@ uvx cfn-lint application-infra.yaml      # or: cfn-lint application-infra.yaml
 uv run scripts/render_runbook.py application-infra.yaml ssm/deploy-application-infra-same-account.yaml \
   --same-account --stack-name 'rec-app-{ApplicationId}-{RecoveryRequestId}' \
   --description "Deploy a per-request recovery application stack (application-infra.yaml) into this account."
+
+uv run scripts/render_runbook.py application-infra.yaml cross-account/ssm/deploy-application-infra.yaml \
+  --stack-name 'rec-app-{ApplicationId}-{RecoveryRequestId}' \
+  --description "Deploy a per-request recovery application stack (application-infra.yaml) into a target account."
 ```
 
-Without `uv`: run `pip install pyyaml` once, then use `python3` in place of `uv run`. It prints the new template hash. Commit the template and the `ssm/` file together.
+The second command keeps the cross-account runbook in step; both must print the same hash.
+
+Without `uv`: run `pip install pyyaml` once, then use `python3` in place of `uv run`. It prints the new template hash. Commit the template and both runbooks together.
 
 If the template gained or lost a parameter, add it to or remove it from every request's parameter file.
 

@@ -11,7 +11,7 @@ maps one-to-one onto CloudFormation input. The template is embedded verbatim
 with its SHA-256, and the rendered runbook is re-read and checked before it is
 written.
 
-  python3 scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-infra.yaml \
+  python3 scripts/render_runbook.py foundation-infra.yaml cross-account/ssm/deploy-foundation-infra.yaml \
       --stack-name recovery-foundation
 
 Requires PyYAML (or run with `uv run scripts/render_runbook.py ...`).

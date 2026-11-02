@@ -4,6 +4,8 @@ The foundation is deployed **once per account and Region**. It creates the isola
 
 **Time:** about 30 minutes the first time, most of it one-time setup. Later updates take about 10 minutes.
 
+This guide is for running the runbook **in the same account** that gets the stack. To deploy from a separate control account, use [cross-account/DEPLOY_FOUNDATION.md](cross-account/DEPLOY_FOUNDATION.md).
+
 **Contents**
 
 1. [Before you start](#1-before-you-start)
@@ -14,8 +16,7 @@ The foundation is deployed **once per account and Region**. It creates the isola
 6. [Roll out a template change](#6-roll-out-a-template-change)
 7. [If something fails](#7-if-something-fails)
 8. [Remove the foundation](#8-remove-the-foundation)
-9. [Appendix: deploy into another account](#appendix-a-deploy-into-another-account)
-10. [Appendix: deploy without the runbook](#appendix-b-deploy-without-the-runbook)
+9. [Appendix: deploy without the runbook](#appendix-deploy-without-the-runbook)
 
 ---
 
@@ -222,12 +223,12 @@ uv run scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-inf
   --same-account --stack-name recovery-foundation \
   --description "Deploy the recovery foundation stack (foundation-infra.yaml) into this account."
 
-uv run scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-infra.yaml \
+uv run scripts/render_runbook.py foundation-infra.yaml cross-account/ssm/deploy-foundation-infra.yaml \
   --stack-name recovery-foundation \
   --description "Deploy the recovery foundation stack (foundation-infra.yaml) into a target account."
 ```
 
-Without `uv`: run `pip install pyyaml` once, then use `python3` in place of `uv run`. Each command prints the new template hash; both must show the same one. Commit the template and both `ssm/` files together.
+Without `uv`: run `pip install pyyaml` once, then use `python3` in place of `uv run`. Each command prints the new template hash; both must show the same one. Commit the template and both runbooks together. The second one is the cross-account runbook; upload it in the control account as in [cross-account/DEPLOY_FOUNDATION.md, section 6](cross-account/DEPLOY_FOUNDATION.md#6-roll-out-a-template-change).
 
 **4. Upload the new runbook version and make it the default:**
 
@@ -317,68 +318,7 @@ You can deploy the foundation again at any time with the same names.
 
 ---
 
-## Appendix A: deploy into another account
-
-Use this when the runbook runs in one account (**account-B**) and the foundation must be created in another (**account-A**). It uses a second runbook, `ssm/deploy-foundation-infra.yaml`, that adds one parameter: `TargetRoleArn`.
-
-```text
-account-B: you ──start──▶ runbook ──runs as──▶ RecoveryAutomationRole
-                                                     │ assumes
-account-A:                                           ▼
-                                             RecoveryDeployRole ──▶ foundation stack
-```
-
-Create the account-B role **first**: IAM rejects a trust policy that names a role that does not exist yet.
-
-**In account-B** (signed in to account-B):
-
-```bash
-export REGION=ap-south-1
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)   # account-B
-export ACCOUNT_A_ID=<account-A-id>
-
-aws iam create-role --role-name RecoveryAutomationRole \
-  --assume-role-policy-document "$(scripts/fill-iam.sh iam/automation-role-trust.json)"
-aws iam put-role-policy --role-name RecoveryAutomationRole --policy-name AssumeTargetDeployRole \
-  --policy-document "$(scripts/fill-iam.sh iam/cross-account/automation-assume-deploy-role-policy.json)"
-
-aws ssm create-document --region "$REGION" --name Recovery-DeployFoundation \
-  --document-type Automation --document-format YAML \
-  --content file://ssm/deploy-foundation-infra.yaml
-```
-
-**In account-A** (signed in to account-A):
-
-```bash
-export REGION=ap-south-1
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)   # account-A
-export ACCOUNT_B_ID=<account-B-id>
-export FOUNDATION_STACK=recovery-foundation FOUNDATION_ENV=recovery-foundation
-
-aws iam create-role --role-name RecoveryDeployRole \
-  --assume-role-policy-document "$(scripts/fill-iam.sh iam/cross-account/deploy-role-trust.json)"
-aws iam put-role-policy --role-name RecoveryDeployRole --policy-name FoundationDeploy \
-  --policy-document "$(scripts/fill-iam.sh iam/foundation-deploy-policy.json)"
-```
-
-**Back in account-B**, write the parameter file as in step 3.1, with account-B's role and one extra line:
-
-```json
-  "TargetRoleArn": ["arn:aws:iam::<account-A-id>:role/RecoveryDeployRole"],
-```
-
-Then preview and deploy with the document `Recovery-DeployFoundation`:
-
-```bash
-scripts/run-runbook.sh Recovery-DeployFoundation params-foundation.json preview
-scripts/run-runbook.sh Recovery-DeployFoundation params-foundation.json deploy
-```
-
-The stack, its outputs, and the failure log are in account-A, in the Region where the runbook ran. Template changes follow section 6 with this document name and file.
-
----
-
-## Appendix B: deploy without the runbook
+## Appendix: deploy without the runbook
 
 For a quick test from your own administrator session, without the automation role:
 
