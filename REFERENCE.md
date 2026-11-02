@@ -31,7 +31,7 @@ Background for people who operate or change this setup. To **deploy**, follow [D
        │     └── Conditional Prod trust (ProdRecipientAccountId, via AWS services only)
        ├── Compatibility Staging Vault (rec-stg-<app>-<req>)
        ├── 14-Day Logically Air-Gapped (LAG) Vault (rec-lag-<app>-<req>)
-       ├── Workload SG (WorkloadPort) + EFS SG (2049) + RDS DB Subnet Group
+       ├── Workload SG (WorkloadPorts) + EFS SG (2049) + RDS DB Subnet Group
        ├── Backup & Restore service role (AWS managed Backup policies, capped by the boundary)
        ├── Operator managed policy (start jobs, pass the role, share with Prod)
        └── SSM Parameter hierarchy (/recovery/<app>/<req>/*)
@@ -151,7 +151,7 @@ aws backup start-restore-job \
 For an RDS DB instance use `DBInstanceIdentifier` instead of `DBClusterIdentifier`, and see the key caveat in [Unified KMS key strategy](#unified-kms-key-strategy-requestkmskey).
 
 #### 2B. Execute Clean-Room Validation
-Run integrity checks and sanity queries from a validation runner attached to the Foundation `ValidationClientSecurityGroup` on `WorkloadPort`.
+Run integrity checks and sanity queries from a validation runner attached to the Foundation `ValidationClientSecurityGroup` on the `WorkloadPorts`.
 
 #### 2C. Back Up the Validated Database through the Staging Vault into the LAG Vault
 The LAG vault only accepts recovery points whose retention is exactly 14 days, so pass the lifecycle explicitly. AWS Backup creates a temporary `DELETE_AFTER_COPY` point in the staging vault and copies it into the LAG vault:

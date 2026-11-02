@@ -164,7 +164,7 @@ def deploy(event, context):
     cfn.create_change_set(
         StackName=name, ChangeSetName=change_set, ChangeSetType=change_set_type,
         TemplateBody=TEMPLATE, Parameters=_parameters(event),
-        Capabilities=["CAPABILITY_NAMED_IAM"],
+        Capabilities=__CAPABILITIES__,
         Tags=[{"Key": "DeployedBy", "Value": "ssm-automation"},
               {"Key": "TemplateSha256", "Value": TEMPLATE_SHA256}])
     try:
@@ -244,7 +244,8 @@ def render(template_path, stack_name, description, same_account=False):
     for bad in ('"""', "{{", "}}"):
         if bad in template_text:
             sys.exit("render: template contains %r, which cannot be embedded safely" % bad)
-    cfn_params = (yaml.load(template_text, Loader=_CfnLoader) or {}).get("Parameters") or {}
+    template = yaml.load(template_text, Loader=_CfnLoader) or {}
+    cfn_params = template.get("Parameters") or {}
     clash = set(cfn_params) & set(RUNBOOK_PARAMETERS + ("Region", "ExecutionId"))
     if clash:
         sys.exit("render: template parameters clash with runbook names: %s" % sorted(clash))
@@ -257,11 +258,16 @@ def render(template_path, stack_name, description, same_account=False):
         sys.exit("render: --stack-name uses unknown parameters: %s" % sorted(unknown))
 
     sha = hashlib.sha256(template_text.encode("utf-8")).hexdigest()
+    # A Transform (e.g. AWS::LanguageExtensions for Fn::ForEach) needs CAPABILITY_AUTO_EXPAND.
+    capabilities = ["CAPABILITY_NAMED_IAM"]
+    if template.get("Transform"):
+        capabilities.append("CAPABILITY_AUTO_EXPAND")
     head, rest = SCRIPT.split("__DEPLOY_ONLY_START__\n")
     deploy_only, tail = rest.split("__DEPLOY_ONLY_END__\n")
     deploy_script = head + (deploy_only.replace("__SHA256__", sha)
                             .replace("__PARAMETER_NAMES__", json.dumps(list(cfn_params)))
                             .replace("__STACK_NAME_FORMAT__", json.dumps(stack_name))
+                            .replace("__CAPABILITIES__", json.dumps(capabilities))
                             .replace("__TEMPLATE__", template_text))
     wait_script = head + tail
 

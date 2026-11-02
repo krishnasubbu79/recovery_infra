@@ -18,6 +18,12 @@
       "Resource": "arn:aws:cloudformation:__REGION__:__ACCOUNT_ID__:stack/rec-app-*/*"
     },
     {
+      "Sid": "CloudFormationLanguageExtensionsTransform",
+      "Effect": "Allow",
+      "Action": "cloudformation:CreateChangeSet",
+      "Resource": "arn:aws:cloudformation:__REGION__:aws:transform/LanguageExtensions"
+    },
+    {
       "Sid": "KmsRequestKey",
       "Effect": "Allow",
       "Action": [

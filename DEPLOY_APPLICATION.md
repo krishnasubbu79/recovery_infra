@@ -47,7 +47,7 @@ You need:
   - an **ApplicationId**: 2–16 lowercase letters or digits, for example `payments`;
   - a **RecoveryRequestId**: 4–24 lowercase letters, digits, or hyphens, for example `req-01`. Use a new one for every request; never reuse one;
   - the **source KMS key ARNs** that encrypt the recovery points you will restore (one or more);
-  - the **database port** to open for validation, for example `5432` or `3306`;
+  - the **ports** to open for validation: one, such as `5432`, or several, such as `5432,3306`;
   - the **Production account ID** that will receive the data, if known. You can add it later.
 - [ ] Each source KMS key must allow this account. The key owner (Source or Bunker account) adds this statement to every key's policy, with `RECOVERY_ACCOUNT_ID` replaced:
 
@@ -103,6 +103,7 @@ What it allows, in short:
 
 - create and update stacks named `rec-app-*` only;
 - create the request's restore role **only with the foundation permissions boundary attached**, and never remove it;
+- use the `AWS::LanguageExtensions` transform, which the template needs to create one security group rule per port;
 - create KMS keys, `rec-*` backup vaults, security groups, DB subnet groups, and `/recovery/*` SSM parameters.
 
 It cannot delete stacks or KMS keys. Those are administrator actions (section 8).
@@ -139,7 +140,7 @@ cat > "params-${APP_ID}-${REQ_ID}.json" <<JSON
   "ApplicationId":             ["${APP_ID}"],
   "RecoveryRequestId":         ["${REQ_ID}"],
   "SourceKmsKeyArns":          ["arn:aws:kms:ap-south-1:111122223333:key/11111111-2222-3333-4444-555555555555"],
-  "WorkloadPort":              ["5432"],
+  "WorkloadPorts":             ["5432"],
   "NeedStagingVault":          ["true"],
   "ProdRecipientAccountId":    [""]
 }
@@ -151,7 +152,7 @@ Then edit the file:
 | Parameter | What to put |
 | :--- | :--- |
 | `SourceKmsKeyArns` | Your source key ARN. For several keys, put them **in the one string**, separated by commas: `["arn:…:key/aaa,arn:…:key/bbb"]`. |
-| `WorkloadPort` | The database or service port validation hosts connect to. EFS always gets port 2049 in its own security group. |
+| `WorkloadPorts` | The ports validation hosts connect to. One port: `["5432"]`. Several: put them **in the one string**, separated by commas with no spaces: `["5432,3306,22"]`. Each port gets its own security group rule. EFS always gets port 2049 in its own security group. |
 | `NeedStagingVault` | Keep `true` if you will back up RDS, Aurora, or EC2. `false` only for S3 or EFS alone. |
 | `ProdRecipientAccountId` | The 12-digit Production account, or `""` for testing. Needed before handoff; you can add it later (section 5). |
 
@@ -219,7 +220,7 @@ The preview's `Action` is `PREVIEW_UPDATE`. Before deploying, check the changes:
 | :--- | :--- |
 | `ProdRecipientAccountId` | Updates the key policy and the operator policy. Safe. |
 | `SourceKmsKeyArns` | Updates the restore role's policy and one SSM parameter. Safe. |
-| `WorkloadPort` | Replaces the workload security group's rule. Restored resources keep the group. |
+| `WorkloadPorts` | Adds a rule for each new port and removes the rules for dropped ports. The security group itself stays, so restored resources keep it. |
 | `NeedStagingVault` `true` → `false` | Removes the staging vault. Fails if it still holds recovery points. |
 | `ApplicationId` or `RecoveryRequestId` | **Never do this.** Every resource name contains them, so everything would be replaced, and vaults holding recovery points cannot be. Deploy a new request instead. |
 
@@ -308,6 +309,8 @@ aws logs tail "/aws/events/${FOUNDATION_ENV}-failures" --region "$REGION" --sinc
 | `Change set failed: …` | CloudFormation rejected the template or a parameter. Nothing changed. | Fix the template or the parameter file. |
 | `ended in UPDATE_ROLLBACK_COMPLETE` | An update failed and was undone. | Fix the cause named in the message, then run again. |
 | `ended in UPDATE_ROLLBACK_FAILED` | The undo itself failed. | `aws cloudformation continue-update-rollback --region "$REGION" --stack-name <stack>`, then rerun. |
+| `Requires capabilities : [CAPABILITY_AUTO_EXPAND]` | The registered runbook is older than the template. | Upload the current runbook (section 6, step 4). |
+| `Transform AWS::LanguageExtensions failed` … `WorkloadIngressPort…` | A port is listed twice in `WorkloadPorts`. | List each port once. |
 | `Embedded template does not match its SHA-256` | The runbook file was edited by hand. | Regenerate and upload it (section 6, steps 3–4). |
 
 **A failed first deployment leaves its KMS key behind**, because the key is kept on purpose (see section 8). Schedule it for deletion as in section 8, step 5.
