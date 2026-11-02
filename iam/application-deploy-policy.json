@@ -1,0 +1,181 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudFormationApplicationStacks",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateChangeSet",
+        "cloudformation:DescribeChangeSet",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:DeleteChangeSet",
+        "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:DescribeStackResources",
+        "cloudformation:GetTemplate",
+        "cloudformation:TagResource"
+      ],
+      "Resource": "arn:aws:cloudformation:__REGION__:__ACCOUNT_ID__:stack/rec-app-*/*"
+    },
+    {
+      "Sid": "KmsRequestKey",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateKey",
+        "kms:DescribeKey",
+        "kms:GetKeyPolicy",
+        "kms:PutKeyPolicy",
+        "kms:EnableKeyRotation",
+        "kms:GetKeyRotationStatus",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:ListResourceTags",
+        "kms:ListAliases"
+      ],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "__REGION__" } }
+    },
+    {
+      "Sid": "KmsRequestKeyAlias",
+      "Effect": "Allow",
+      "Action": ["kms:CreateAlias", "kms:DeleteAlias", "kms:UpdateAlias"],
+      "Resource": [
+        "arn:aws:kms:__REGION__:__ACCOUNT_ID__:alias/rec-*",
+        "arn:aws:kms:__REGION__:__ACCOUNT_ID__:key/*"
+      ]
+    },
+    {
+      "Sid": "KmsGrantForVaultCreation",
+      "Effect": "Allow",
+      "Action": "kms:CreateGrant",
+      "Resource": "arn:aws:kms:__REGION__:__ACCOUNT_ID__:key/*",
+      "Condition": { "StringLike": { "kms:ViaService": "backup.*.amazonaws.com" } }
+    },
+    {
+      "Sid": "BackupRequestVaults",
+      "Effect": "Allow",
+      "Action": [
+        "backup:*BackupVault*",
+        "backup:TagResource",
+        "backup:UntagResource",
+        "backup:ListTags"
+      ],
+      "Resource": "arn:aws:backup:__REGION__:__ACCOUNT_ID__:backup-vault:rec-*"
+    },
+    {
+      "Sid": "BackupListAndStorage",
+      "Effect": "Allow",
+      "Action": ["backup:List*", "backup-storage:MountCapsule"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Ec2SecurityGroups",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "aws:RequestedRegion": "__REGION__" } }
+    },
+    {
+      "Sid": "RdsDbSubnetGroup",
+      "Effect": "Allow",
+      "Action": [
+        "rds:CreateDBSubnetGroup",
+        "rds:ModifyDBSubnetGroup",
+        "rds:DeleteDBSubnetGroup",
+        "rds:AddTagsToResource",
+        "rds:RemoveTagsFromResource",
+        "rds:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:rds:__REGION__:__ACCOUNT_ID__:subgrp:rec-dbsg-*"
+    },
+    {
+      "Sid": "RdsDescribe",
+      "Effect": "Allow",
+      "Action": "rds:DescribeDBSubnetGroups",
+      "Resource": "*"
+    },
+    {
+      "Sid": "SsmRequestParameters",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:DeleteParameters",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:ssm:__REGION__:__ACCOUNT_ID__:parameter/recovery/*"
+    },
+    {
+      "Sid": "SsmDescribeParameters",
+      "Effect": "Allow",
+      "Action": "ssm:DescribeParameters",
+      "Resource": "*"
+    },
+    {
+      "Sid": "IamRequestRoleOnlyWithBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePermissionsBoundary"
+      ],
+      "Resource": "arn:aws:iam::__ACCOUNT_ID__:role/rec-app-restore-*",
+      "Condition": { "StringEquals": { "iam:PermissionsBoundary": "arn:aws:iam::__ACCOUNT_ID__:policy/__FOUNDATION_ENV__-__REGION__-app-boundary" } }
+    },
+    {
+      "Sid": "IamRequestRoleManage",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:DeleteRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::__ACCOUNT_ID__:role/rec-app-restore-*"
+    },
+    {
+      "Sid": "IamOperatorPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:ListEntitiesForPolicy",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": "arn:aws:iam::__ACCOUNT_ID__:policy/rec-app-operator-*"
+    },
+    {
+      "Sid": "NeverRemoveTheBoundary",
+      "Effect": "Deny",
+      "Action": "iam:DeleteRolePermissionsBoundary",
+      "Resource": "*"
+    }
+  ]
+}
