@@ -143,8 +143,12 @@ def _parameters(event):
 def deploy(event, context):
     if hashlib.sha256(TEMPLATE.encode("utf-8")).hexdigest() != TEMPLATE_SHA256:
         raise RuntimeError("Embedded template does not match its SHA-256; re-render the runbook.")
+    expected_name = STACK_NAME_FORMAT.format(**event)
+    name = event["StackName"] or expected_name
+    if "{" in STACK_NAME_FORMAT and name != expected_name:
+        raise RuntimeError("StackName must be %s for this request; leave it empty to derive it. "
+                           "Do not use the foundation stack name." % expected_name)
     cfn = _cloudformation(event)
-    name = event["StackName"] or STACK_NAME_FORMAT.format(**event)
     stack = _stack(cfn, name)
     status = stack["StackStatus"] if stack else None
     if status is None or status == "REVIEW_IN_PROGRESS":
@@ -246,8 +250,8 @@ def render(template_path, stack_name, description):
     if clash:
         sys.exit("render: template parameters clash with runbook names: %s" % sorted(clash))
 
-    # A stack name with {Param} placeholders is derived from template parameters
-    # when the StackName runbook parameter is left empty.
+    # Request stack names are bound to the template parameters in the pattern;
+    # an explicit StackName must match the derived name.
     placeholders = [f for _, f, _, _ in string.Formatter().parse(stack_name) if f]
     unknown = set(placeholders) - set(cfn_params)
     if unknown:
@@ -288,7 +292,7 @@ def render(template_path, stack_name, description):
     if placeholders:
         parameters["StackName"].update(
             default="", allowedPattern=r"^([A-Za-z][A-Za-z0-9-]{0,127})?$",
-            description="CloudFormation stack name. Empty = %s." % stack_name)
+            description="Leave empty to derive %s. An explicit name must match this request exactly; never use the foundation stack name." % stack_name)
     for name, spec in cfn_params.items():
         parameters[name] = runbook_parameter(name, spec)
 

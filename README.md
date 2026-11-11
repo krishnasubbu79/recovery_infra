@@ -53,6 +53,7 @@ Deploy the foundation first. Every application stack depends on it.
 | `scripts/fill-iam.sh` | Fill IAM policy placeholders from the account variables in the guides. |
 | `scripts/run-runbook.sh` | Start preview/deploy in the processing account and wait for its result. |
 | `scripts/render_runbook.py` | Generate both runbooks from their source templates; never edit generated files by hand. |
+| `scripts/test_render_runbook.py` | Regression tests for request stack targeting and foundation isolation. |
 
 ## How deployment works
 
@@ -95,3 +96,9 @@ Create the processing role first, because IAM validates the principal in the rec
 ## Tools you need
 
 AWS CLI v2, `jq`, and `bash`. Rolling out a template change also needs Python 3 with PyYAML (or [`uv`](https://docs.astral.sh/uv/)) and, optionally, `cfn-lint`.
+
+Run the deployment regression tests without AWS credentials:
+
+```bash
+uv run --with pyyaml --with boto3 python -m unittest discover -s scripts -p 'test_*.py' -v
+```

@@ -232,7 +232,9 @@ Every file in `ssm/` is **generated** from a template; do not edit it by hand. `
 * embeds the template verbatim and stamps its SHA-256 into the runbook description, the stack tag `TemplateSha256`, and the step output; the deploy step refuses to run if the embedded template no longer matches that hash;
 * re-reads the rendered runbook and checks that the embedded template is byte-identical to the source and that every parameter is mapped, before writing the file.
 
-Runbook-only parameters: `AutomationAssumeRole` (**required**; the role in the processing account that Automation runs the steps as, because `aws:executeScript` gets no AWS credentials without it), `StackName` (the foundation's name, or empty for application stacks to use `rec-app-<ApplicationId>-<RecoveryRequestId>`), `PreviewOnly` (default `false`; `true` creates the change set and lists the changes without executing it), and `TargetRoleArn` (**required**; the deploy role in the recovery account).
+Runbook-only parameters: `AutomationAssumeRole` (**required**; the role in the processing account that Automation runs the steps as, because `aws:executeScript` gets no AWS credentials without it), `StackName` (the foundation's name, or empty for application stacks to use `rec-app-<ApplicationId>-<RecoveryRequestId>`; an explicit application name must match that request exactly), `PreviewOnly` (default `false`; `true` creates the change set and lists the changes without executing it), and `TargetRoleArn` (**required**; the deploy role in the recovery account).
+
+Before making any AWS calls, application deployment rejects a `StackName` that differs from the derived request name. `FoundationEnvironmentName` only selects the foundation exports to import; it never selects the stack to create or update.
 
 Steps:
 1. **DeployStack** assumes `TargetRoleArn`, creates a change set (`CREATE` for a new stack, `UPDATE` for an existing one), lists its changes in the `Changes` output, and executes it unless `PreviewOnly=true`. A rerun with no changes ends as `NO_CHANGES`. A stack left in `ROLLBACK_COMPLETE` must be deleted first.

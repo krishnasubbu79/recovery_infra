@@ -517,8 +517,12 @@ mainSteps:
         def deploy(event, context):
             if hashlib.sha256(TEMPLATE.encode("utf-8")).hexdigest() != TEMPLATE_SHA256:
                 raise RuntimeError("Embedded template does not match its SHA-256; re-render the runbook.")
+            expected_name = STACK_NAME_FORMAT.format(**event)
+            name = event["StackName"] or expected_name
+            if "{" in STACK_NAME_FORMAT and name != expected_name:
+                raise RuntimeError("StackName must be %s for this request; leave it empty to derive it. "
+                                   "Do not use the foundation stack name." % expected_name)
             cfn = _cloudformation(event)
-            name = event["StackName"] or STACK_NAME_FORMAT.format(**event)
             stack = _stack(cfn, name)
             status = stack["StackStatus"] if stack else None
             if status is None or status == "REVIEW_IN_PROGRESS":

@@ -91,6 +91,10 @@ Everything here runs in the **processing account**, with the variables from step
 
 ### 3.1 Write the request's parameter file
 
+Start a **new execution of `Recovery-DeployApplication`**, not a rerun of `Recovery-DeployFoundation`. In the SSM console, leave **`StackName` empty**: the runbook derives `rec-app-<ApplicationId>-<RecoveryRequestId>`. An explicit name must match that derived name exactly.
+
+`FoundationEnvironmentName` identifies the existing foundation whose network and permissions boundary the application imports. It is **not** the application stack name. Never copy the foundation's `StackName` into the application input.
+
 ```bash
 APP_ID=payments
 REQ_ID=req-01
@@ -114,6 +118,7 @@ Edit these request parameters. Each value is a list with one string, as SSM expe
 
 | Parameter | What to put |
 | :--- | :--- |
+| `StackName` | Omit from the JSON file or leave empty in the console. Derived as `rec-app-<ApplicationId>-<RecoveryRequestId>`; any different explicit name is rejected before AWS calls. |
 | `FoundationEnvironmentName` | The foundation's `EnvironmentName`, normally `recovery-foundation`. |
 | `SourceKmsKeyArns` | Source key ARNs. Several keys go in one comma-separated string: `["arn:…:key/aaa,arn:…:key/bbb"]`. |
 | `WorkloadPorts` | Validation ports, without duplicates or spaces: `["5432,3306"]`. Each gets a rule. EFS always gets port 2049 in its own security group. |
@@ -248,6 +253,7 @@ Read the `Failure` text printed by `run-runbook.sh`. For common credential, chan
 
 | The message says | What it means | What to do |
 | :--- | :--- | :--- |
+| `StackName must be rec-app-… for this request` | The input targets the foundation or another request's stack. No AWS calls were made by the deployment step. | Start `Recovery-DeployApplication` with `StackName` empty and the correct request IDs. Do not change `FoundationEnvironmentName` to the application name. |
 | `… is not authorized to perform: sts:AssumeRole on resource: …RecoveryDeployRole` | The role link between the accounts is broken, or `TargetRoleArn` is wrong. | Check `TargetRoleArn`, then see [DEPLOY_FOUNDATION.md, section 7](DEPLOY_FOUNDATION.md#7-if-something-fails). |
 | `AccessDenied` on `rec-app-…`, KMS, backup, IAM, or SSM actions | `RecoveryDeployRole` in the recovery account lacks `ApplicationDeploy`, or it was filled with the wrong account, Region, or `FOUNDATION_ENV`. | Reapply step 2.1 in the recovery account. |
 | `… CreateChangeSet … transform/LanguageExtensions` denied | `ApplicationDeploy` in the recovery account is older than the template. | Reapply step 2.1 in the recovery account. |
