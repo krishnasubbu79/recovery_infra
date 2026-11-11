@@ -1,6 +1,6 @@
 # Recovery Infrastructure: Reference
 
-Background for people who operate or change this setup. To **deploy**, follow [DEPLOY_FOUNDATION.md](DEPLOY_FOUNDATION.md) and [DEPLOY_APPLICATION.md](DEPLOY_APPLICATION.md) instead.
+Background for people who operate or change this setup. To **deploy**, follow [DEPLOY_FOUNDATION.md](DEPLOY_FOUNDATION.md) and [DEPLOY_APPLICATION.md](DEPLOY_APPLICATION.md) instead. Deployment runs in the processing account through the recovery account's deploy role; restore, validation, and handoff commands below run in the recovery account.
 
 1. [Architecture](#1-architecture) and design decisions
 2. [SSM Parameter Store reference](#2-ssm-parameter-store-reference)
@@ -71,7 +71,7 @@ Background for people who operate or change this setup. To **deploy**, follow [D
     * `backup:StartBackupJob` into this request's vaults, and restore/copy jobs from recovery points in this Region;
     * read-only AWS Backup and RAM calls, and reading `/recovery/<app>/<req>/*`;
     * when `ProdRecipientAccountId` is set, creating or associating a RAM share whose principal is that account only.
-* The stack does not attach the policy to anyone; attach it explicitly ([DEPLOY_APPLICATION.md, section 4](DEPLOY_APPLICATION.md#4-check-the-result-and-grant-operator-access)).
+* The stack does not attach the policy to anyone; attach it explicitly in the recovery account ([DEPLOY_APPLICATION.md, section 5](DEPLOY_APPLICATION.md#5-grant-operator-access-in-the-recovery-account)). This is separate from the processing account's runbook operator policy.
 
 #### Native SSM Parameter Store Integration
 * `application-infra.yaml` populates up to 11 SSM parameters under `/recovery/<ApplicationId>/<RecoveryRequestId>/*` (two are skipped when `NeedStagingVault=false`).
@@ -101,7 +101,7 @@ Upon reaching `CREATE_COMPLETE`, `application-infra.yaml` populates the followin
 | `/recovery/<app>/<req>/staging-vault-name` | `CompatibilityStagingVault` name | `--backup-vault-name` for non-fully-managed backups *(if enabled)*. |
 | `/recovery/<app>/<req>/staging-vault-arn` | `CompatibilityStagingVault` ARN | Vault ARN reference *(if enabled)*. |
 | `/recovery/<app>/<req>/restore-role-arn` | `RequestBackupAndRestoreRole` ARN | `--iam-role-arn` for every AWS Backup restore, backup, and copy job. |
-| `/recovery/<app>/<req>/operator-policy-arn` | `RequestOperatorPolicy` ARN | Policy to attach to the operator role ([DEPLOY_APPLICATION.md, section 4](DEPLOY_APPLICATION.md#4-check-the-result-and-grant-operator-access)). |
+| `/recovery/<app>/<req>/operator-policy-arn` | `RequestOperatorPolicy` ARN | Policy to attach to the recovery-account operator role ([DEPLOY_APPLICATION.md, section 5](DEPLOY_APPLICATION.md#5-grant-operator-access-in-the-recovery-account)). |
 | `/recovery/<app>/<req>/workload-sg-id` | `WorkloadSecurityGroup` ID | `VpcSecurityGroupIds` for restored RDS/Aurora or EC2. |
 | `/recovery/<app>/<req>/efs-sg-id` | `EfsSecurityGroup` ID | Security group for restored EFS mount targets. |
 | `/recovery/<app>/<req>/db-subnet-group` | `DatabaseSubnetGroup` name | `DBSubnetGroupName` for restored RDS/Aurora. |
@@ -225,15 +225,15 @@ Once the validated recovery points are in `HandoffLagVault`:
 ---
 
 ## 4. How the deployment runbooks are built
-Every file in `ssm/` and `cross-account/ssm/` is **generated** from a template; do not edit it by hand. `scripts/render_runbook.py`:
+Every file in `ssm/` is **generated** from a template; do not edit it by hand. `scripts/render_runbook.py` generates only the cross-account deployment flow:
 
 * creates one runbook parameter for **each** CloudFormation parameter, with the same name, default, `AllowedValues`, and `AllowedPattern` (for `String` parameters), so SSM rejects bad input before CloudFormation is called;
 * passes every one of them to CloudFormation by name (`ParameterKey` = runbook parameter name), and fails if any is missing;
 * embeds the template verbatim and stamps its SHA-256 into the runbook description, the stack tag `TemplateSha256`, and the step output; the deploy step refuses to run if the embedded template no longer matches that hash;
 * re-reads the rendered runbook and checks that the embedded template is byte-identical to the source and that every parameter is mapped, before writing the file.
 
-Runbook-only parameters: `AutomationAssumeRole` (**required**; the role Automation runs the steps as, because `aws:executeScript` gets no AWS credentials without it), `StackName` (the foundation's name, or empty for application stacks to use `rec-app-<ApplicationId>-<RecoveryRequestId>`), `PreviewOnly` (default `false`; `true` creates the change set and lists the changes without executing it), and, in the cross-account runbooks only, `TargetRoleArn` (the deploy role in the recovery account).
+Runbook-only parameters: `AutomationAssumeRole` (**required**; the role in the processing account that Automation runs the steps as, because `aws:executeScript` gets no AWS credentials without it), `StackName` (the foundation's name, or empty for application stacks to use `rec-app-<ApplicationId>-<RecoveryRequestId>`), `PreviewOnly` (default `false`; `true` creates the change set and lists the changes without executing it), and `TargetRoleArn` (**required**; the deploy role in the recovery account).
 
 Steps:
-1. **DeployStack** assumes `TargetRoleArn` (cross-account runbooks only), creates a change set (`CREATE` for a new stack, `UPDATE` for an existing one), lists its changes in the `Changes` output, and executes it unless `PreviewOnly=true`. A rerun with no changes ends as `NO_CHANGES`. A stack left in `ROLLBACK_COMPLETE` must be deleted first.
+1. **DeployStack** assumes `TargetRoleArn`, creates a change set (`CREATE` for a new stack, `UPDATE` for an existing one), lists its changes in the `Changes` output, and executes it unless `PreviewOnly=true`. A rerun with no changes ends as `NO_CHANGES`. A stack left in `ROLLBACK_COMPLETE` must be deleted first.
 2. **WaitForStack** polls until the stack finishes (up to about 36 minutes across retries), returns the stack outputs, or fails with the first failed resources and their reasons.

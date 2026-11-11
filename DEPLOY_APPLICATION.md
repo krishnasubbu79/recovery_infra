@@ -1,57 +1,30 @@
-# Deploy an Application Stack (one per recovery request)
+# Cross-Account: Deploy an Application Stack (one per recovery request)
 
-This guide is for running the runbook **in the same account** that gets the stack. To deploy from a separate processing account, use [cross-account/DEPLOY_APPLICATION.md](cross-account/DEPLOY_APPLICATION.md).
+The runbook runs in the **processing account**; the application stack `rec-app-<ApplicationId>-<RecoveryRequestId>` is created in the **recovery account**. Read [README.md](README.md) for the roles.
 
-Each recovery request gets its own application stack, named `rec-app-<ApplicationId>-<RecoveryRequestId>`. It holds everything that request needs: its KMS key, a staging vault, a 14-day locked handoff vault, security groups, a DB subnet group, a restore role, an operator policy, and SSM parameters under `/recovery/<app>/<request>/`.
-
-**Time:** about 20 minutes the first time in an account (one-time setup), then about 10 minutes per request.
+**Time:** about 10 minutes the first time (one-time setup), then about 10 minutes per request.
 
 **Contents**
 
 1. [Before you start](#1-before-you-start)
 2. [One-time setup](#2-one-time-setup)
 3. [Deploy a request](#3-deploy-a-request)
-4. [Check the result and grant operator access](#4-check-the-result-and-grant-operator-access)
-5. [Change a request later](#5-change-a-request-later)
-6. [Roll out a template change](#6-roll-out-a-template-change)
+4. [Check the result](#4-check-the-result)
+5. [Grant operator access in the recovery account](#5-grant-operator-access-in-the-recovery-account)
+6. [Change a request or roll out a template change](#6-change-a-request-or-roll-out-a-template-change)
 7. [If something fails](#7-if-something-fails)
 8. [Tear down a request](#8-tear-down-a-request)
-
-What the runbook does on every run:
-
-```text
-                 ┌──────────────────────────── DeployStack ─────────────────────────────┐   ┌─ WaitForStack ─┐
- ┌───────────┐   ┌────────────┐   ┌─────────────┐   ┌──────────────┐   ┌────────────────┐   ┌────────────────┐
- │ Start run │──▶│ Stack name │──▶│ Check stack │──▶│  Change set  │──▶│    Execute     │──▶│      Wait      │──▶ CREATE_ / UPDATE_COMPLETE
- │params JSON│   │rec-app-a-r │   │new or update│   │ list changes │   │ unless preview │   │ return outputs │    (stack outputs returned)
- └───────────┘   └────────────┘   └──────┬──────┘   └──────┬───────┘   └───────┬────────┘   └───────┬────────┘
-                                         │ busy or         │ no diff           │ PreviewOnly         │ resource
-                                         │ failed create   │                   │ =true               │ fails
-                                         ▼                 ▼                   ▼                     ▼
-                                  ┌─────────────┐   ┌──────────────┐   ┌────────────────┐   ┌────────────────┐
-                                  │   Refused   │   │  No changes  │   │  Preview only  │   │  Rolled back   │
-                                  │nothing done │   │ set deleted  │   │change set kept │   │reasons reported│
-                                  └─────────────┘   └──────────────┘   └────────────────┘   └────────────────┘
-```
-
-Only the main path with `deploy` changes anything. **Refused**, **No changes**, and **Preview only** stop before the stack is touched. **Rolled back** means the change started, failed, and CloudFormation undid it.
 
 ---
 
 ## 1. Before you start
 
-You need:
-
-- [ ] The **foundation** deployed in the same account and Region ([DEPLOY_FOUNDATION.md](DEPLOY_FOUNDATION.md)).
-- [ ] AWS CLI v2 and `jq`, signed in to the recovery account. One-time setup needs an IAM administrator.
-- [ ] This folder (`recovery-infra/`) on that machine. All commands run from inside it.
-- [ ] For the request:
-  - an **ApplicationId**: 2–16 lowercase letters or digits, for example `payments`;
-  - a **RecoveryRequestId**: 4–24 lowercase letters, digits, or hyphens, for example `req-01`. Use a new one for every request; never reuse one;
-  - the **source KMS key ARNs** that encrypt the recovery points you will restore (one or more);
-  - the **ports** to open for validation: one, such as `5432`, or several, such as `5432,3306`;
-  - the **Production account ID** that will receive the data, if known. You can add it later.
-- [ ] Each source KMS key must allow this account. The key owner (Source or Bunker account) adds this statement to every key's policy, with `RECOVERY_ACCOUNT_ID` replaced:
+- [ ] The **foundation** is deployed in the recovery account, in the same Region ([DEPLOY_FOUNDATION.md](DEPLOY_FOUNDATION.md)). Its roles and runbook operator permissions are already set up.
+- [ ] AWS CLI v2 and `jq`, with `recovery-infra/` as the working directory. Deployment uses processing-account credentials; role setup, restore operations, and cleanup require recovery-account access.
+- [ ] An `ApplicationId`: 2–16 lowercase letters or digits, for example `payments`.
+- [ ] A new `RecoveryRequestId`: 4–24 lowercase letters, digits, or hyphens, for example `req-01`. Never reuse an ID for a different request.
+- [ ] The source KMS key ARNs, validation ports, and (if known) the 12-digit Production recipient account ID.
+- [ ] Each source KMS key allows the **recovery account** (not the processing account) in its key policy. The key owner adds the following statement with `RECOVERY_ACCOUNT_ID` replaced by the recovery account's ID. Without it the stack deploys, but restores from those recovery points fail:
 
   ```json
   {
@@ -64,81 +37,69 @@ You need:
   }
   ```
 
-  The stack deploys without it, but every restore from those recovery points will fail.
-
 ---
 
 ## 2. One-time setup
 
-Do this once per account. Skip any step that is already done.
+### 2.1 Recovery account: let the deploy role create application stacks
 
-### 2.1 Set your variables
-
-Run this in every new terminal before the other commands.
+Sign in to the **recovery account** as an administrator.
 
 ```bash
 cd recovery-infra
 export REGION=ap-south-1
-export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)   # recovery account
 export FOUNDATION_ENV=recovery-foundation     # the foundation's EnvironmentName
-echo "Account $ACCOUNT_ID, Region $REGION"
 
-# The foundation must be there:
-aws cloudformation list-exports --region "$REGION" \
-  --query "Exports[?Name=='${FOUNDATION_ENV}-BoundaryArn'].Value" --output text
-```
-
-The last command must print a policy ARN. If it prints nothing, deploy the foundation first, or fix `FOUNDATION_ENV`.
-
-### 2.2 Let the automation role deploy application stacks
-
-This adds a second policy to the `RecoveryAutomationRole` created for the foundation ([DEPLOY_FOUNDATION.md, step 2.2](DEPLOY_FOUNDATION.md#22-create-the-automation-role)).
-
-```bash
 aws iam put-role-policy \
-  --role-name RecoveryAutomationRole \
+  --role-name RecoveryDeployRole \
   --policy-name ApplicationDeploy \
   --policy-document "$(scripts/fill-iam.sh iam/application-deploy-policy.json)"
 ```
 
-What it allows, in short:
+`RecoveryDeployRole` now has two policies, `FoundationDeploy` and `ApplicationDeploy`. `ApplicationDeploy` lets it:
 
-- create and update stacks named `rec-app-*` only;
-- create the request's restore role **only with the foundation permissions boundary attached**, and never remove it;
-- use the `AWS::LanguageExtensions` transform, which the template needs to create one security group rule per port;
+- create and update stacks named `rec-app-*` only, using the `AWS::LanguageExtensions` transform (one security group rule per port);
+- create the request's restore role **only with the foundation permissions boundary**, and never remove the boundary;
 - create KMS keys, `rec-*` backup vaults, security groups, DB subnet groups, and `/recovery/*` SSM parameters.
 
-It cannot delete stacks or KMS keys. Those are administrator actions (section 8).
+It cannot delete stacks or KMS keys.
 
-People who run the runbook need the operator policy from [DEPLOY_FOUNDATION.md, step 2.3](DEPLOY_FOUNDATION.md#23-allow-people-to-run-the-runbooks); it already covers this runbook.
+### 2.2 Processing account: register the runbook
 
-### 2.3 Register the runbook
+Sign in to the **processing account**. Nothing else is needed there: `RecoveryAutomationRole` and the operator permissions from the foundation setup already cover this runbook.
 
 ```bash
+cd recovery-infra
+export REGION=ap-south-1
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)   # processing account
+export RECOVERY_ACCOUNT_ID=<recovery-account-id>
+
 aws ssm create-document --region "$REGION" \
-  --name Recovery-DeployApplication-SameAccount \
+  --name Recovery-DeployApplication \
   --document-type Automation --document-format YAML \
-  --content file://ssm/deploy-application-infra-same-account.yaml
+  --content file://ssm/deploy-application-infra.yaml
 ```
 
-If it says `DocumentAlreadyExists`, follow [section 6, step 4](#6-roll-out-a-template-change) to upload the current version instead.
+If it says `DocumentAlreadyExists`, upload the current version instead ([section 6](#6-change-a-request-or-roll-out-a-template-change), step 4).
 
 ---
 
 ## 3. Deploy a request
 
-### 3.1 Write the request's parameter file
+Everything here runs in the **processing account**, with the variables from step 2.2.
 
-One file per request. It records exactly what was deployed; keep it, and reuse it for every later run of that request.
+### 3.1 Write the request's parameter file
 
 ```bash
 APP_ID=payments
 REQ_ID=req-01
 
-cat > "params-${APP_ID}-${REQ_ID}.json" <<JSON
+cat > "params-${RECOVERY_ACCOUNT_ID}-${APP_ID}-${REQ_ID}.json" <<JSON
 {
   "AutomationAssumeRole":      ["arn:aws:iam::${ACCOUNT_ID}:role/RecoveryAutomationRole"],
-  "FoundationEnvironmentName": ["${FOUNDATION_ENV}"],
+  "TargetRoleArn":             ["arn:aws:iam::${RECOVERY_ACCOUNT_ID}:role/RecoveryDeployRole"],
+  "FoundationEnvironmentName": ["recovery-foundation"],
   "ApplicationId":             ["${APP_ID}"],
   "RecoveryRequestId":         ["${REQ_ID}"],
   "SourceKmsKeyArns":          ["arn:aws:kms:ap-south-1:111122223333:key/11111111-2222-3333-4444-555555555555"],
@@ -149,205 +110,182 @@ cat > "params-${APP_ID}-${REQ_ID}.json" <<JSON
 JSON
 ```
 
-Then edit the file:
+Edit these request parameters. Each value is a list with one string, as SSM expects:
 
 | Parameter | What to put |
 | :--- | :--- |
-| `SourceKmsKeyArns` | Your source key ARN. For several keys, put them **in the one string**, separated by commas: `["arn:…:key/aaa,arn:…:key/bbb"]`. |
-| `WorkloadPorts` | The ports validation hosts connect to. One port: `["5432"]`. Several: put them **in the one string**, separated by commas with no spaces: `["5432,3306,22"]`. Each port gets its own security group rule. EFS always gets port 2049 in its own security group. |
-| `NeedStagingVault` | Keep `true` if you will back up RDS, Aurora, or EC2. `false` only for S3 or EFS alone. |
-| `ProdRecipientAccountId` | The 12-digit Production account, or `""` for testing. Needed before handoff; you can add it later (section 5). |
+| `FoundationEnvironmentName` | The foundation's `EnvironmentName`, normally `recovery-foundation`. |
+| `SourceKmsKeyArns` | Source key ARNs. Several keys go in one comma-separated string: `["arn:…:key/aaa,arn:…:key/bbb"]`. |
+| `WorkloadPorts` | Validation ports, without duplicates or spaces: `["5432,3306"]`. Each gets a rule. EFS always gets port 2049 in its own security group. |
+| `NeedStagingVault` | Keep `true` for RDS, Aurora, or EC2 backups. Use `false` only for S3 or EFS alone. |
+| `ProdRecipientAccountId` | The 12-digit Production account, or `""` until known. Required before handoff; it can be added later. |
 
-Each value is a list with one string; that is how SSM expects it. The stack name is worked out for you: `rec-app-<ApplicationId>-<RecoveryRequestId>`.
+The deployment roles determine which account runs Automation and which receives the stack:
+
+| Parameter | Value |
+| :--- | :--- |
+| `AutomationAssumeRole` | `RecoveryAutomationRole` in the **processing account**. |
+| `TargetRoleArn` | `RecoveryDeployRole` in the **recovery account**. This decides where the stack goes. |
+
+Keep the file; every later run of this request reuses it.
 
 ### 3.2 Preview
 
 ```bash
-scripts/run-runbook.sh Recovery-DeployApplication-SameAccount "params-${APP_ID}-${REQ_ID}.json" preview
+scripts/run-runbook.sh Recovery-DeployApplication "params-${RECOVERY_ACCOUNT_ID}-${APP_ID}-${REQ_ID}.json" preview
 ```
 
-Expect:
-
-- `Result: Success`
-- `DeployStack.StackName`: `rec-app-payments-req-01`
-- `DeployStack.Action`: `PREVIEW_CREATE`
-- `DeployStack.Changes`: `Add` lines for the KMS key and alias, two vaults, two security groups, the DB subnet group, the restore role, the operator policy, and the SSM parameters.
+Expect `Result: Success`, `DeployStack.StackName` = `rec-app-payments-req-01`, `DeployStack.Action` = `PREVIEW_CREATE`, and `Add` lines for the KMS key, vaults, security groups and their port rules, subnet group, restore role, operator policy, and SSM parameters.
 
 ### 3.3 Deploy
 
 ```bash
-scripts/run-runbook.sh Recovery-DeployApplication-SameAccount "params-${APP_ID}-${REQ_ID}.json" deploy
+scripts/run-runbook.sh Recovery-DeployApplication "params-${RECOVERY_ACCOUNT_ID}-${APP_ID}-${REQ_ID}.json" deploy
 ```
 
-It takes about 3–5 minutes. Expect `CREATE`, then `CREATE_COMPLETE`, with the vault names, role ARN, and security group IDs under `WaitForStack.Outputs`. If it fails, go to [section 7](#7-if-something-fails).
+It takes 3–5 minutes and ends with `CREATE_COMPLETE`.
 
 ---
 
-## 4. Check the result and grant operator access
+## 4. Check the result
 
-**See everything the request created:**
+The runbook output (in the processing account) lists the stack outputs under `WaitForStack.Outputs`. Note these two; the recovery account's administrator needs them:
+
+- `OperatorPolicyArn`: the policy to attach in section 5.
+- `SsmParameterPathPrefix`: where the request's details are stored in the recovery account, for example `/recovery/payments/req-01`.
+
+Also listed: the KMS key, vault names and ARNs, security group IDs, DB subnet group, and restore role.
+
+**Optionally, in the recovery account**, list everything the request created:
 
 ```bash
 aws ssm get-parameters-by-path --region "$REGION" --path "/recovery/${APP_ID}/${REQ_ID}" \
   --query 'Parameters[].[Name,Value]' --output table
 ```
 
-You should see up to 11 parameters (9 when `NeedStagingVault` is `false`): the KMS key, vault names and ARNs, restore role, operator policy, security groups, DB subnet group, and source key list.
+---
 
-**Let the people doing the recovery use it.** The stack creates a policy for them but attaches it to no one. Attach it to their role:
+## 5. Grant operator access in the recovery account
+
+The people doing the restore work in the **recovery account**. The stack creates a policy for them but attaches it to no one. An administrator in the recovery account attaches it to their role:
 
 ```bash
-OPERATOR_POLICY_ARN=$(aws ssm get-parameter --region "$REGION" \
-  --name "/recovery/${APP_ID}/${REQ_ID}/operator-policy-arn" --query Parameter.Value --output text)
-
-aws iam attach-role-policy --role-name <operator-role-name> --policy-arn "$OPERATOR_POLICY_ARN"
+aws iam attach-role-policy --role-name <operator-role-name> \
+  --policy-arn "arn:aws:iam::<recovery-account-id>:policy/rec-app-operator-${APP_ID}-${REQ_ID}"
 ```
 
-The request is ready. To restore, validate, and hand off data, follow [REFERENCE.md, section 3](REFERENCE.md#3-using-a-request-stack-restore-validate-hand-off).
+This is the `OperatorPolicyArn` from section 4. The request is ready; restore, validate, and hand off as in [REFERENCE.md, section 3](REFERENCE.md#3-using-a-request-stack-restore-validate-hand-off), working in the recovery account.
 
 ---
 
-## 5. Change a request later
+## 6. Change a request or roll out a template change
 
-The most common change is adding `ProdRecipientAccountId` before handoff, or adding a source key. Edit the request's parameter file, then:
+### Change a request
+
+Edit the request's parameter file in the processing account, then:
 
 ```bash
-scripts/run-runbook.sh Recovery-DeployApplication-SameAccount "params-${APP_ID}-${REQ_ID}.json" preview
-scripts/run-runbook.sh Recovery-DeployApplication-SameAccount "params-${APP_ID}-${REQ_ID}.json" deploy
+scripts/run-runbook.sh Recovery-DeployApplication "params-${RECOVERY_ACCOUNT_ID}-${APP_ID}-${REQ_ID}.json" preview
+scripts/run-runbook.sh Recovery-DeployApplication "params-${RECOVERY_ACCOUNT_ID}-${APP_ID}-${REQ_ID}.json" deploy
 ```
 
-The preview's `Action` is `PREVIEW_UPDATE`. Before deploying, check the changes:
+The preview's `Action` is `PREVIEW_UPDATE`. Check the changes before deploying:
 
 | You changed | Effect |
 | :--- | :--- |
-| `ProdRecipientAccountId` | Updates the key policy and the operator policy. Safe. |
-| `SourceKmsKeyArns` | Updates the restore role's policy and one SSM parameter. Safe. |
-| `WorkloadPorts` | Adds a rule for each new port and removes the rules for dropped ports. The security group itself stays, so restored resources keep it. |
-| `NeedStagingVault` `true` → `false` | Removes the staging vault. Fails if it still holds recovery points. |
-| `ApplicationId` or `RecoveryRequestId` | **Never do this.** Every resource name contains them, so everything would be replaced, and vaults holding recovery points cannot be. Deploy a new request instead. |
+| `ProdRecipientAccountId` | Updates the key policy and operator policy. |
+| `SourceKmsKeyArns` | Updates the restore role's policy and one SSM parameter. |
+| `WorkloadPorts` | Adds and removes port rules without replacing the security group. |
+| `NeedStagingVault` `true` → `false` | Removes the staging vault; fails if it still holds recovery points. |
+| `ApplicationId` or `RecoveryRequestId` | Never change these; deploy a new request instead. |
 
 Stop on any `replacement=True` for `HandoffLagVault` or `CompatibilityStagingVault`.
 
----
+### Roll out a template change
 
-## 6. Roll out a template change
+**1. Edit** `application-infra.yaml`. Never edit files in `ssm/`.
 
-Follow these steps every time `application-infra.yaml` changes. The runbook carries its own copy of the template, so editing the template alone changes nothing in AWS.
-
-**1. Edit** `application-infra.yaml`. Never edit the files in `ssm/`.
-
-**2. Check it** (optional, needs `cfn-lint`):
+**2. Regenerate the application runbook:**
 
 ```bash
-uvx cfn-lint application-infra.yaml      # or: cfn-lint application-infra.yaml
-```
-
-**3. Regenerate the runbook:**
-
-```bash
-uv run scripts/render_runbook.py application-infra.yaml ssm/deploy-application-infra-same-account.yaml \
-  --same-account --stack-name 'rec-app-{ApplicationId}-{RecoveryRequestId}' \
-  --description "Deploy a per-request recovery application stack (application-infra.yaml) into this account."
-
-uv run scripts/render_runbook.py application-infra.yaml cross-account/ssm/deploy-application-infra.yaml \
+uv run scripts/render_runbook.py application-infra.yaml ssm/deploy-application-infra.yaml \
   --stack-name 'rec-app-{ApplicationId}-{RecoveryRequestId}' \
   --description "Deploy a per-request recovery application stack (application-infra.yaml) into the recovery account."
 ```
 
-The second command keeps the cross-account runbook in step; both must print the same hash.
+The command prints the template hash. Commit the template and generated runbook together. If the template gained or lost a parameter, update every request's parameter file. Without `uv`: `pip install pyyaml` once, then use `python3` instead of `uv run`.
 
-Without `uv`: run `pip install pyyaml` once, then use `python3` in place of `uv run`. It prints the new template hash. Commit the template and both runbooks together.
+**3. If the template now creates a new kind of resource,** extend `iam/application-deploy-policy.json` and reapply it **in the recovery account** (step 2.1) before deploying.
 
-If the template gained or lost a parameter, add it to or remove it from every request's parameter file.
-
-**4. Upload the new runbook version and make it the default:**
+**4. Upload the new runbook version in the processing account:**
 
 ```bash
-DOC=Recovery-DeployApplication-SameAccount
+DOC=Recovery-DeployApplication
 VERSION=$(aws ssm update-document --region "$REGION" --name "$DOC" \
   --document-version '$LATEST' --document-format YAML \
-  --content file://ssm/deploy-application-infra-same-account.yaml \
+  --content file://ssm/deploy-application-infra.yaml \
   --query DocumentDescription.DocumentVersion --output text)
 aws ssm update-document-default-version --region "$REGION" --name "$DOC" --document-version "$VERSION"
 echo "Now on version $VERSION"
 ```
 
-`DuplicateDocumentContent` means the runbook did not change, so there is nothing to roll out.
+New requests get the new template from now on. Existing requests keep the old one until updated.
 
-From now on, **new** requests get the new template. Existing requests keep the old one until you update them.
-
-**5. Update the existing requests that need the change.** List them with the template each one runs:
+**5. Update existing requests** that need the change: preview and deploy each one with its parameter file, as in "Change a request". To see which template each stack runs, a recovery account user can list its `TemplateSha256` tag:
 
 ```bash
-aws cloudformation describe-stacks --region "$REGION" \
-  --query "Stacks[?starts_with(StackName,'rec-app-')].[StackName,StackStatus,Tags[?Key=='TemplateSha256']|[0].Value]" \
-  --output table
+aws cloudformation describe-stacks --region "$REGION" --stack-name "rec-app-${APP_ID}-${REQ_ID}" \
+  --query 'Stacks[0].Tags[?Key==`TemplateSha256`].Value' --output text
 ```
 
-For each one, preview, check the changes as in section 5, then deploy with that request's parameter file:
-
-```bash
-scripts/run-runbook.sh Recovery-DeployApplication-SameAccount params-payments-req-01.json preview
-scripts/run-runbook.sh Recovery-DeployApplication-SameAccount params-payments-req-01.json deploy
-```
-
-If the template now creates a new kind of resource, the automation role may need more permissions: extend `iam/application-deploy-policy.json` and rerun step 2.2 before deploying.
-
-**To undo a change**, revert the template in git and repeat steps 3–5.
+**To undo a change**, revert the template in git and repeat steps 2, 4, and 5.
 
 ---
 
 ## 7. If something fails
 
-Read the `Failure` text printed by `run-runbook.sh`. It names the failed resource first. The same reasons are in the failure log:
-
-```bash
-aws logs tail "/aws/events/${FOUNDATION_ENV}-failures" --region "$REGION" --since 1h --format short
-```
+Read the `Failure` text printed by `run-runbook.sh`. For common credential, change-set, busy-stack, rollback, and template-hash failures, see [DEPLOY_FOUNDATION.md, section 7](DEPLOY_FOUNDATION.md#7-if-something-fails), using the application stack name for recovery commands. Application-specific failures:
 
 | The message says | What it means | What to do |
 | :--- | :--- | :--- |
-| `No export named recovery-foundation-…` | The foundation is missing, or `FoundationEnvironmentName` is wrong. | Check step 2.1, fix the parameter file. |
-| `NoCredentialsError` | The runbook ran without its role. | Make sure `AutomationAssumeRole` is in the parameter file. |
-| `AccessDenied` / `not authorized` | The automation role lacks a permission. | Rerun step 2.2. If the template changed, extend `iam/application-deploy-policy.json` first. |
-| `… iam:CreateRole … PermissionsBoundary` denied | The boundary ARN in the policy does not match the foundation's. | Check `FOUNDATION_ENV` and `REGION`, then rerun step 2.2. |
-| `… already exists` (vault, alias, role, security group) | Something from an earlier request with the same IDs is still there. | Use a new `RecoveryRequestId`. |
-| `… is ROLLBACK_COMPLETE from a failed create` | The first deployment failed. | Fix the cause, delete the stack as an administrator (`aws cloudformation delete-stack --region "$REGION" --stack-name rec-app-${APP_ID}-${REQ_ID}`), then deploy again. See the note below about the KMS key. |
-| `… is busy (…_IN_PROGRESS)` | Another operation is still running. | Wait a few minutes and rerun. |
-| `Change set failed: …` | CloudFormation rejected the template or a parameter. Nothing changed. | Fix the template or the parameter file. |
-| `ended in UPDATE_ROLLBACK_COMPLETE` | An update failed and was undone. | Fix the cause named in the message, then run again. |
-| `ended in UPDATE_ROLLBACK_FAILED` | The undo itself failed. | `aws cloudformation continue-update-rollback --region "$REGION" --stack-name <stack>`, then rerun. |
-| `Requires capabilities : [CAPABILITY_AUTO_EXPAND]` | The registered runbook is older than the template. | Upload the current runbook (section 6, step 4). |
-| `Transform AWS::LanguageExtensions failed` … `WorkloadIngressPort…` | A port is listed twice in `WorkloadPorts`. | List each port once. |
-| `Embedded template does not match its SHA-256` | The runbook file was edited by hand. | Regenerate and upload it (section 6, steps 3–4). |
+| `… is not authorized to perform: sts:AssumeRole on resource: …RecoveryDeployRole` | The role link between the accounts is broken, or `TargetRoleArn` is wrong. | Check `TargetRoleArn`, then see [DEPLOY_FOUNDATION.md, section 7](DEPLOY_FOUNDATION.md#7-if-something-fails). |
+| `AccessDenied` on `rec-app-…`, KMS, backup, IAM, or SSM actions | `RecoveryDeployRole` in the recovery account lacks `ApplicationDeploy`, or it was filled with the wrong account, Region, or `FOUNDATION_ENV`. | Reapply step 2.1 in the recovery account. |
+| `… CreateChangeSet … transform/LanguageExtensions` denied | `ApplicationDeploy` in the recovery account is older than the template. | Reapply step 2.1 in the recovery account. |
+| `No export named recovery-foundation-…` | No foundation in the recovery account in this Region, or `FoundationEnvironmentName` is wrong. | Check the foundation and the parameter file. |
+| `… is ROLLBACK_COMPLETE from a failed create` | The first deployment failed. | A recovery account administrator deletes the stack and schedules the left-over KMS key for deletion (section 8, steps 3 and 5). Then deploy again. |
+| `… iam:CreateRole … PermissionsBoundary` denied | The deploy policy's boundary ARN does not match the foundation. | Check `FOUNDATION_ENV` and `REGION`, then reapply step 2.1. |
+| `… already exists` (vault, alias, role, security group) | Resources remain from an earlier request with the same IDs. | Use a new `RecoveryRequestId`. |
+| `Requires capabilities : [CAPABILITY_AUTO_EXPAND]` | The registered runbook predates the template's transform. | Upload the current runbook (section 6, step 4). |
+| `Transform AWS::LanguageExtensions failed` … `WorkloadIngressPort…` | A port appears twice in `WorkloadPorts`. | List each port once. |
 
-**A failed first deployment leaves its KMS key behind**, because the key is kept on purpose (see section 8). Schedule it for deletion as in section 8, step 5.
+The failure log `/aws/events/recovery-foundation-failures` is in the **recovery account**.
 
 ---
 
 ## 8. Tear down a request
 
-Do this only after the handoff is complete and Production has confirmed it restored the data.
+Neither role can delete stacks or KMS keys. An administrator in the **recovery account** does all of this, after the handoff is complete and Production has confirmed it restored the data.
 
-**1. Delete the restored resources.** Databases, file systems, buckets, and instances created by restore jobs do not belong to the stack, and they keep its security groups and subnet group in use.
+**1. Delete the restored resources** (databases, file systems, buckets, instances). They do not belong to the stack and keep its security groups in use.
 
 **2. Detach the operator policy** from every role it was attached to:
 
 ```bash
+OPERATOR_POLICY_ARN="arn:aws:iam::<recovery-account-id>:policy/rec-app-operator-${APP_ID}-${REQ_ID}"
 aws iam list-entities-for-policy --policy-arn "$OPERATOR_POLICY_ARN" --query 'PolicyRoles[].RoleName'
 aws iam detach-role-policy --role-name <operator-role-name> --policy-arn "$OPERATOR_POLICY_ARN"
 ```
 
-**3. Delete the stack** as an administrator (the automation role is not allowed to):
+**3. Delete the stack:**
 
 ```bash
 aws cloudformation delete-stack --region "$REGION" --stack-name "rec-app-${APP_ID}-${REQ_ID}"
 aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name "rec-app-${APP_ID}-${REQ_ID}"
 ```
 
-**4. If deletion fails on `HandoffLagVault`**, the vault still holds recovery points. They are locked for 14 days from when they were created and cannot be removed sooner. Run the `delete-stack` command again after they expire.
+**4. If deletion fails on `HandoffLagVault`**, it still holds recovery points, which are locked for 14 days. Run step 3 again after they expire.
 
-**5. Schedule the KMS key for deletion.** The request's key survives the stack so the handed-off recovery points stay readable. Once the 14 days have passed and Production no longer needs them:
+**5. Schedule the KMS key for deletion.** The key survives stack deletion so handed-off recovery points stay readable. Once their 14-day retention has passed and Production no longer needs them, find the retained key in the recovery account:
 
 ```bash
 KEY_ARN=$(aws resourcegroupstaggingapi get-resources --region "$REGION" \
@@ -355,9 +293,14 @@ KEY_ARN=$(aws resourcegroupstaggingapi get-resources --region "$REGION" \
   --tag-filters Key=ApplicationId,Values="$APP_ID" Key=RecoveryRequestId,Values="$REQ_ID" \
   --query 'ResourceTagMappingList[0].ResourceARN' --output text)
 echo "$KEY_ARN"
+```
+
+Check that this is the correct request's key ARN before scheduling deletion:
+
+```bash
 aws kms schedule-key-deletion --region "$REGION" --key-id "$KEY_ARN" --pending-window-in-days 30
 ```
 
-Check that the first command printed a key ARN before running the second. The key can still be recovered for 30 days with `aws kms cancel-key-deletion`.
+The key can still be recovered during that window with `aws kms cancel-key-deletion`.
 
-**6. Archive** the request's parameter file with the change record.
+**6. In the processing account**, archive the request's parameter file.

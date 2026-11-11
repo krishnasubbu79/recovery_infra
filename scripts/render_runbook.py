@@ -2,8 +2,8 @@
 # /// script
 # dependencies = ["pyyaml"]
 # ///
-"""Render an SSM Automation runbook that deploys a CloudFormation template, either into the
-same account or from a processing account into the recovery account.
+"""Render an SSM Automation runbook that deploys a CloudFormation template
+from a processing account into the recovery account.
 
 The runbook's parameters are generated from the template's Parameters section
 (same names, defaults, allowed values, and patterns), so runbook input always
@@ -11,7 +11,7 @@ maps one-to-one onto CloudFormation input. The template is embedded verbatim
 with its SHA-256, and the rendered runbook is re-read and checked before it is
 written.
 
-  python3 scripts/render_runbook.py foundation-infra.yaml cross-account/ssm/deploy-foundation-infra.yaml \
+  python3 scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-infra.yaml \
       --stack-name recovery-foundation
 
 Requires PyYAML (or run with `uv run scripts/render_runbook.py ...`).
@@ -28,7 +28,6 @@ import yaml
 
 # Runbook parameters that are not CloudFormation parameters.
 RUNBOOK_PARAMETERS = ("AutomationAssumeRole", "TargetRoleArn", "StackName", "PreviewOnly")
-SAME_ACCOUNT_PARAMETERS = ("AutomationAssumeRole", "StackName", "PreviewOnly")
 
 SCRIPT = r'''import functools
 import hashlib
@@ -57,9 +56,6 @@ def _short_errors(handler):
 
 def _cloudformation(event):
     region = event["Region"]
-    if "TargetRoleArn" not in event:
-        # Same-account runbook: use the automation's own credentials.
-        return boto3.client("cloudformation", region_name=region)
     session = ("recovery-deploy-" + event["ExecutionId"])[:64]
     creds = boto3.client("sts", region_name=region).assume_role(
         RoleArn=event["TargetRoleArn"], RoleSessionName=session)["Credentials"]
@@ -239,7 +235,7 @@ def runbook_parameter(cfn_name, spec):
     return param
 
 
-def render(template_path, stack_name, description, same_account=False):
+def render(template_path, stack_name, description):
     template_text = template_path.read_text(encoding="utf-8")
     for bad in ('"""', "{{", "}}"):
         if bad in template_text:
@@ -289,11 +285,6 @@ def render(template_path, stack_name, description, same_account=False):
             "type": "String", "default": "false", "allowedValues": ["false", "true"],
             "description": "true = create the change set and list the changes without executing it. Review, then rerun with false."},
     }
-    if same_account:
-        del parameters["TargetRoleArn"]
-        parameters["AutomationAssumeRole"]["description"] = (
-            "(Required) Role in this account that Automation assumes to create the stack. Must trust ssm.amazonaws.com.")
-        parameters["StackName"]["description"] = "CloudFormation stack name in this account."
     if placeholders:
         parameters["StackName"].update(
             default="", allowedPattern=r"^([A-Za-z][A-Za-z0-9-]{0,127})?$",
@@ -304,8 +295,6 @@ def render(template_path, stack_name, description, same_account=False):
     payload = {"Region": "{{ global:REGION }}", "ExecutionId": "{{ automation:EXECUTION_ID }}",
                "TargetRoleArn": "{{ TargetRoleArn }}", "StackName": "{{ StackName }}",
                "PreviewOnly": "{{ PreviewOnly }}"}
-    if same_account:
-        del payload["TargetRoleArn"]
     wait_payload = dict(payload, StackName="{{ DeployStack.StackName }}")
     payload.update({name: "{{ %s }}" % name for name in cfn_params})
 
@@ -342,14 +331,13 @@ def render(template_path, stack_name, description, same_account=False):
     return "\n".join(doc) + "\n", template_text, cfn_params, sha
 
 
-def check(rendered, template_text, cfn_params, sha, same_account=False):
+def check(rendered, template_text, cfn_params, sha):
     """Re-read the rendered runbook and prove it carries the template and parameters intact."""
     doc = yaml.safe_load(rendered)
     names = list(doc["parameters"])
-    expected = SAME_ACCOUNT_PARAMETERS if same_account else RUNBOOK_PARAMETERS
-    assert names == list(expected) + list(cfn_params), names
+    assert names == list(RUNBOOK_PARAMETERS) + list(cfn_params), names
     for step in doc["mainSteps"]:
-        assert ("TargetRoleArn" in step["inputs"]["InputPayload"]) != same_account
+        assert step["inputs"]["InputPayload"]["TargetRoleArn"] == "{{ TargetRoleArn }}"
     deploy_step, wait_step = doc["mainSteps"]
     assert "TEMPLATE" not in wait_step["inputs"]["Script"]
     ast.parse(wait_step["inputs"]["Script"])
@@ -373,11 +361,9 @@ def main():
     parser.add_argument("--stack-name", required=True,
                         help="Default stack name, or a pattern such as rec-app-{ApplicationId}-{RecoveryRequestId}.")
     parser.add_argument("--description", default="Deploy a recovery CloudFormation stack into the recovery account.")
-    parser.add_argument("--same-account", action="store_true",
-                        help="Deploy into the account running the runbook (no TargetRoleArn, no role assumption).")
     args = parser.parse_args()
-    rendered, template_text, cfn_params, sha = render(args.template, args.stack_name, args.description, args.same_account)
-    check(rendered, template_text, cfn_params, sha, args.same_account)
+    rendered, template_text, cfn_params, sha = render(args.template, args.stack_name, args.description)
+    check(rendered, template_text, cfn_params, sha)
     if len(rendered.encode("utf-8")) > 64 * 1024:
         sys.exit("render: runbook is %d bytes, over the 64 KB SSM document limit" % len(rendered.encode("utf-8")))
     args.output.parent.mkdir(parents=True, exist_ok=True)
