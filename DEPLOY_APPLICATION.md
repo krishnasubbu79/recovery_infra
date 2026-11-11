@@ -1,4 +1,4 @@
-# Cross-Account: Deploy an Application Stack (one per recovery request)
+# Deploy an Application Stack (one per recovery request)
 
 The runbook runs in the **processing account**; the application stack `rec-app-<ApplicationId>-<RecoveryRequestId>` is created in the **recovery account**. Read [README.md](README.md) for the roles.
 

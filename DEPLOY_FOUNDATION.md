@@ -1,4 +1,4 @@
-# Cross-Account: Deploy the Recovery Foundation
+# Deploy the Recovery Foundation
 
 The runbook runs in the **processing account**; the foundation stack is created in the **recovery account**. Read [README.md](README.md) first for how this works and which roles are involved.
 

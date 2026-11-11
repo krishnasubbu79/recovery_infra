@@ -204,7 +204,7 @@ aws backup start-backup-job \
 
 ---
 
-### Step 4: Cross-Account Production Handoff
+### Step 4: Production Handoff
 
 Once the validated recovery points are in `HandoffLagVault`:
 
@@ -225,7 +225,7 @@ Once the validated recovery points are in `HandoffLagVault`:
 ---
 
 ## 4. How the deployment runbooks are built
-Every file in `ssm/` is **generated** from a template; do not edit it by hand. `scripts/render_runbook.py` generates only the cross-account deployment flow:
+Every file in `ssm/` is **generated** from a template; do not edit it by hand. `scripts/render_runbook.py` generates the processing-to-recovery deployment runbooks:
 
 * creates one runbook parameter for **each** CloudFormation parameter, with the same name, default, `AllowedValues`, and `AllowedPattern` (for `String` parameters), so SSM rejects bad input before CloudFormation is called;
 * passes every one of them to CloudFormation by name (`ParameterKey` = runbook parameter name), and fails if any is missing;

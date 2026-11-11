@@ -2,7 +2,15 @@
 
 CloudFormation and SSM Automation runbooks for an isolated recovery account: restore AWS Backup recovery points into a locked-down network, validate them, and hand them off to Production.
 
-Deployment is **cross-account only**: run SSM Automation in the **processing account** to create stacks in a separate **recovery account**. The account and IAM role model is described below; start with [DEPLOY_FOUNDATION.md](DEPLOY_FOUNDATION.md) for setup.
+This directory contains one deployment flow: SSM Automation runs in the **processing account** and assumes a deploy role to create stacks in the separate **recovery account**. Every template, runbook, policy, script, and guide here supports that flow.
+
+## Start here
+
+1. Follow [DEPLOY_FOUNDATION.md](DEPLOY_FOUNDATION.md) to set up the roles in both accounts and deploy the foundation.
+2. Follow [DEPLOY_APPLICATION.md](DEPLOY_APPLICATION.md) to deploy one application stack per recovery request.
+3. Use [REFERENCE.md](REFERENCE.md#3-using-a-request-stack-restore-validate-hand-off) for restore, validation, and Production handoff from the recovery account.
+
+Run commands from `recovery-infra/`. Each guide identifies the account to sign in to for each step.
 
 ## What gets deployed
 
@@ -26,18 +34,25 @@ Deploy the foundation first. Every application stack depends on it.
 
 ## Files
 
-```text
-foundation-infra.yaml      CloudFormation template: foundation stack
-application-infra.yaml     CloudFormation template: per-request application stack
-ssm/                       Cross-account deployment runbooks (GENERATED: never edit by hand)
-iam/                       IAM policies for the runbook roles, with __PLACEHOLDERS__
-scripts/fill-iam.sh        Fills the placeholders in an iam/ policy from shell variables
-scripts/run-runbook.sh     Starts a runbook in preview or deploy mode and waits for the result
-scripts/render_runbook.py  Regenerates the runbooks after a template change
-DEPLOY_FOUNDATION.md       Roles in both accounts, then the foundation
-DEPLOY_APPLICATION.md      One application stack per recovery request
-REFERENCE.md               Design, SSM parameters, and the restore/handoff procedure
-```
+| File | Purpose |
+| :--- | :--- |
+| `README.md` | Entry point, account model, and file index. |
+| `DEPLOY_FOUNDATION.md` | Set up both accounts and deploy the foundation. |
+| `DEPLOY_APPLICATION.md` | Deploy and manage a recovery request. |
+| `REFERENCE.md` | Resource design, SSM parameters, restore, validation, and handoff. |
+| `foundation-infra.yaml` | Source template for the foundation stack in the recovery account. |
+| `application-infra.yaml` | Source template for each request stack in the recovery account. |
+| `ssm/deploy-foundation-infra.yaml` | Generated foundation runbook; register in the processing account. |
+| `ssm/deploy-application-infra.yaml` | Generated application runbook; register in the processing account. |
+| `iam/automation-role-trust.json` | Processing role: trust SSM Automation. |
+| `iam/automation-assume-deploy-role-policy.json` | Processing role: allow assuming the recovery deploy role. |
+| `iam/runbook-operator-policy.json` | Processing operator: manage/run documents and pass the automation role. |
+| `iam/deploy-role-trust.json` | Recovery deploy role: trust the processing automation role. |
+| `iam/foundation-deploy-policy.json` | Recovery deploy role: deploy foundation resources. |
+| `iam/application-deploy-policy.json` | Recovery deploy role: deploy request resources. |
+| `scripts/fill-iam.sh` | Fill IAM policy placeholders from the account variables in the guides. |
+| `scripts/run-runbook.sh` | Start preview/deploy in the processing account and wait for its result. |
+| `scripts/render_runbook.py` | Generate both runbooks from their source templates; never edit generated files by hand. |
 
 ## How deployment works
 
@@ -76,8 +91,6 @@ Create the processing role first, because IAM validates the principal in the rec
 - The foundation creates `<foundation-stack>-VpcFlowLogDeliveryRole-…` for VPC flow logs to CloudWatch Logs.
 - Each application stack creates `rec-app-restore-<app>-<request>` for AWS Backup jobs, constrained by the foundation permissions boundary.
 - Each application stack creates the managed policy `rec-app-operator-<app>-<request>` for recovery-account restore operators. It is attached to no one by default; a recovery-account administrator attaches it ([DEPLOY_APPLICATION.md, section 5](DEPLOY_APPLICATION.md#5-grant-operator-access-in-the-recovery-account)). This is distinct from the processing account's runbook operator policy.
-
-**Run every command from `recovery-infra/`.** The deployment guides identify which account's credentials each step requires.
 
 ## Tools you need
 
