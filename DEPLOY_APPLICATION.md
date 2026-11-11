@@ -1,6 +1,6 @@
 # Deploy an Application Stack (one per recovery request)
 
-This guide is for running the runbook **in the same account** that gets the stack. To deploy from a separate control account, use [cross-account/DEPLOY_APPLICATION.md](cross-account/DEPLOY_APPLICATION.md).
+This guide is for running the runbook **in the same account** that gets the stack. To deploy from a separate processing account, use [cross-account/DEPLOY_APPLICATION.md](cross-account/DEPLOY_APPLICATION.md).
 
 Each recovery request gets its own application stack, named `rec-app-<ApplicationId>-<RecoveryRequestId>`. It holds everything that request needs: its KMS key, a staging vault, a 14-day locked handoff vault, security groups, a DB subnet group, a restore role, an operator policy, and SSM parameters under `/recovery/<app>/<request>/`.
 
@@ -251,7 +251,7 @@ uv run scripts/render_runbook.py application-infra.yaml ssm/deploy-application-i
 
 uv run scripts/render_runbook.py application-infra.yaml cross-account/ssm/deploy-application-infra.yaml \
   --stack-name 'rec-app-{ApplicationId}-{RecoveryRequestId}' \
-  --description "Deploy a per-request recovery application stack (application-infra.yaml) into a target account."
+  --description "Deploy a per-request recovery application stack (application-infra.yaml) into the recovery account."
 ```
 
 The second command keeps the cross-account runbook in step; both must print the same hash.

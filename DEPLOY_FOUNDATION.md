@@ -4,7 +4,7 @@ The foundation is deployed **once per account and Region**. It creates the isola
 
 **Time:** about 30 minutes the first time, most of it one-time setup. Later updates take about 10 minutes.
 
-This guide is for running the runbook **in the same account** that gets the stack. To deploy from a separate control account, use [cross-account/DEPLOY_FOUNDATION.md](cross-account/DEPLOY_FOUNDATION.md).
+This guide is for running the runbook **in the same account** that gets the stack. To deploy from a separate processing account, use [cross-account/DEPLOY_FOUNDATION.md](cross-account/DEPLOY_FOUNDATION.md).
 
 **Contents**
 
@@ -225,10 +225,10 @@ uv run scripts/render_runbook.py foundation-infra.yaml ssm/deploy-foundation-inf
 
 uv run scripts/render_runbook.py foundation-infra.yaml cross-account/ssm/deploy-foundation-infra.yaml \
   --stack-name recovery-foundation \
-  --description "Deploy the recovery foundation stack (foundation-infra.yaml) into a target account."
+  --description "Deploy the recovery foundation stack (foundation-infra.yaml) into the recovery account."
 ```
 
-Without `uv`: run `pip install pyyaml` once, then use `python3` in place of `uv run`. Each command prints the new template hash; both must show the same one. Commit the template and both runbooks together. The second one is the cross-account runbook; upload it in the control account as in [cross-account/DEPLOY_FOUNDATION.md, section 6](cross-account/DEPLOY_FOUNDATION.md#6-roll-out-a-template-change).
+Without `uv`: run `pip install pyyaml` once, then use `python3` in place of `uv run`. Each command prints the new template hash; both must show the same one. Commit the template and both runbooks together. The second one is the cross-account runbook; upload it in the processing account as in [cross-account/DEPLOY_FOUNDATION.md, section 6](cross-account/DEPLOY_FOUNDATION.md#6-roll-out-a-template-change).
 
 **4. Upload the new runbook version and make it the default:**
 

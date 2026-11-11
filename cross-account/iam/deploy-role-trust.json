@@ -2,7 +2,7 @@
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Principal": { "AWS": "arn:aws:iam::__ACCOUNT_B_ID__:role/RecoveryAutomationRole" },
+    "Principal": { "AWS": "arn:aws:iam::__PROCESSING_ACCOUNT_ID__:role/RecoveryAutomationRole" },
     "Action": "sts:AssumeRole"
   }]
 }

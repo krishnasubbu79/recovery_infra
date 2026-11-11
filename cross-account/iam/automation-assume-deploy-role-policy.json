@@ -4,6 +4,6 @@
     "Sid": "AssumeTargetDeployRole",
     "Effect": "Allow",
     "Action": "sts:AssumeRole",
-    "Resource": "arn:aws:iam::__ACCOUNT_A_ID__:role/RecoveryDeployRole"
+    "Resource": "arn:aws:iam::__RECOVERY_ACCOUNT_ID__:role/RecoveryDeployRole"
   }]
 }

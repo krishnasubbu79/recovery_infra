@@ -2,8 +2,8 @@
 # /// script
 # dependencies = ["pyyaml"]
 # ///
-"""Render an SSM Automation runbook that deploys a CloudFormation template into
-another account.
+"""Render an SSM Automation runbook that deploys a CloudFormation template, either into the
+same account or from a processing account into the recovery account.
 
 The runbook's parameters are generated from the template's Parameters section
 (same names, defaults, allowed values, and patterns), so runbook input always
@@ -280,11 +280,11 @@ def render(template_path, stack_name, description, same_account=False):
         "TargetRoleArn": {
             "type": "String",
             "allowedPattern": r"^arn:aws[a-z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+$",
-            "description": "Deploy role in the target account. Must trust this account's automation identity."},
+            "description": "Deploy role (RecoveryDeployRole) in the recovery account. Must trust this processing account's RecoveryAutomationRole."},
         "StackName": {
             "type": "String", "default": stack_name,
             "allowedPattern": r"^[A-Za-z][A-Za-z0-9-]{0,127}$",
-            "description": "CloudFormation stack name in the target account."},
+            "description": "CloudFormation stack name in the recovery account."},
         "PreviewOnly": {
             "type": "String", "default": "false", "allowedValues": ["false", "true"],
             "description": "true = create the change set and list the changes without executing it. Review, then rerun with false."},
@@ -372,7 +372,7 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("--stack-name", required=True,
                         help="Default stack name, or a pattern such as rec-app-{ApplicationId}-{RecoveryRequestId}.")
-    parser.add_argument("--description", default="Deploy a recovery CloudFormation stack into a target account.")
+    parser.add_argument("--description", default="Deploy a recovery CloudFormation stack into the recovery account.")
     parser.add_argument("--same-account", action="store_true",
                         help="Deploy into the account running the runbook (no TargetRoleArn, no role assumption).")
     args = parser.parse_args()

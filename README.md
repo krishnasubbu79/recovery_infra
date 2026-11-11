@@ -17,7 +17,7 @@ Deploy the foundation first. Every application stack depends on it.
 | :--- | :--- |
 | Set up a new account or Region | [DEPLOY_FOUNDATION.md](DEPLOY_FOUNDATION.md) |
 | Start a new recovery request | [DEPLOY_APPLICATION.md](DEPLOY_APPLICATION.md) |
-| Deploy from a separate control account (runbooks in one account, stacks in another) | [cross-account/README.md](cross-account/README.md) |
+| Deploy from a separate processing account (runbooks in the processing account, stacks in the recovery account) | [cross-account/README.md](cross-account/README.md) |
 | Change a template and roll it out | The "Roll out a template change" section of the matching guide |
 | Restore data, validate it, and hand it to Production | [REFERENCE.md, section 3](REFERENCE.md#3-using-a-request-stack-restore-validate-hand-off) |
 | Understand why it is built this way | [REFERENCE.md](REFERENCE.md) |
@@ -35,7 +35,7 @@ scripts/render_runbook.py  Regenerates the runbooks after a template change
 DEPLOY_FOUNDATION.md       Step-by-step: foundation stack
 DEPLOY_APPLICATION.md      Step-by-step: application stack
 REFERENCE.md               Design, SSM parameters, and the restore/handoff procedure
-cross-account/             Runbooks, role files, and guides for deploying from a control account
+cross-account/             Runbooks, role files, and guides for deploying from a processing account into the recovery account
 ```
 
 ## How deployment works
